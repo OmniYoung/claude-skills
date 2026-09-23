@@ -470,7 +470,7 @@ for %%F in (specs\\*.json) do (
 
 if %N%==0 (
     echo   실행할 스펙이 없습니다.
-    echo   Claude에서 /qa-test 를 먼저 실행해 스펙을 만들어주세요.
+    echo   Claude에게 qa-test 스킬로 스펙을 만들어달라고 요청하세요.
     echo.
     pause
     exit /b 1
