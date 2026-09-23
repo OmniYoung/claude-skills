@@ -142,9 +142,20 @@ py -m playwright install chromium
 
 Claude 에게 이렇게만 말하면 됩니다. 스킬 설치 경로는 알아서 찾습니다.
 
-> "qa-test 작업 폴더 만들어줘"
+> "이 기획 폴더에 qa-test 작업 폴더 만들어줘"
 
-`qa_auto/{specs, cases, fixtures, output}` 과 `run_qa.bat` 이 생깁니다.
+**검수할 기획 자료가 모여 있는 폴더 아래**에 만듭니다 (예: `projects/재고_대시보드/qa_auto/`).
+기획을 남에게 넘길 때 폴더째 주면 테스트 케이스와 스펙이 같이 따라가야 하기 때문입니다.
+기획마다 따로 만듭니다.
+
+```
+projects/내기획/
+├── 기획_내용.md
+├── 목업_v1.html
+└── qa_auto/          ← 여기
+    ├── specs/  cases/  fixtures/  output/
+    └── run_qa.bat
+```
 
 **2) 케이스 만들기** — Claude 에게 맡깁니다
 
