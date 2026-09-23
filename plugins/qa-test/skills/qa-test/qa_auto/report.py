@@ -43,7 +43,7 @@ def _case_block(r):
     )
 
     return """
-<section class="case">
+<section class="case" data-status="{status}">
   <header>
     <span class="badge" style="color:{color};background:{bg}">{label}</span>
     <h3>{id} &middot; {title}</h3>
@@ -57,7 +57,7 @@ def _case_block(r):
   {steps_html}
   {shots_html}
 </section>""".format(
-        color=color, bg=bg, label=label,
+        color=color, bg=bg, label=label, status=r["status"],
         id=_esc(r["id"]), title=_esc(r["title"]), dur=r["duration"],
         req=_esc(r["requirement"]), src=_esc(r["source"]),
         reason='<dt>사유</dt><dd class="reason">{}</dd>'.format(_esc(r["reason"])) if r["reason"] else "",
@@ -71,8 +71,10 @@ def build_report(spec, results, warnings, out_dir, dry_run):
     counts = {k: sum(1 for r in results if r["status"] == k) for k in STATUS_META}
 
     cards = "".join(
-        '<div class="card" style="background:{bg}"><b style="color:{c}">{n}</b><span>{l}</span></div>'.format(
-            bg=STATUS_META[k][2], c=STATUS_META[k][1], n=counts[k], l=STATUS_META[k][0])
+        '<button class="card" data-filter="{k}" '
+        'style="background:{bg}"{dis}><b style="color:{c}">{n}</b><span>{l}</span></button>'.format(
+            k=k, bg=STATUS_META[k][2], c=STATUS_META[k][1], n=counts[k],
+            l=STATUS_META[k][0], dis="" if counts[k] else " disabled")
         for k in ("PASS", "FAIL", "SKIPPED", "BLOCKED")
     )
 
@@ -108,10 +110,19 @@ def build_report(spec, results, warnings, out_dir, dry_run):
   .sub {{ color:#6b7280; font-size:13px; margin-bottom:24px; }}
   .drytag {{ display:inline-block; background:#fff6e0; color:#8a6100;
              padding:2px 8px; border-radius:4px; font-size:12px; font-weight:700; }}
-  .cards {{ display:flex; gap:12px; margin-bottom:24px; }}
-  .card {{ flex:1; padding:16px; border-radius:8px; text-align:center; }}
+  .cards {{ display:flex; gap:12px; margin-bottom:8px; }}
+  .card {{ flex:1; padding:16px; border-radius:8px; text-align:center;
+           border:2px solid transparent; font-family:inherit; cursor:pointer;
+           transition:border-color .12s, opacity .12s; }}
+  .card:hover:not(:disabled) {{ border-color:#9ca3af; }}
+  .card.on {{ border-color:#1c1f23; }}
+  .card:disabled {{ opacity:.45; cursor:default; }}
   .card b {{ display:block; font-size:28px; line-height:1.2; }}
   .card span {{ font-size:12px; color:#4b5563; }}
+  .fltbar {{ font-size:12px; color:#6b7280; margin-bottom:20px; min-height:20px; }}
+  .fltbar button {{ background:none; border:0; color:#3b6fd4; cursor:pointer;
+                    font:inherit; text-decoration:underline; padding:0 0 0 6px; }}
+  .case[hidden] {{ display:none; }}
   .warn, .pending {{ padding:16px; border-radius:8px; margin-bottom:20px; font-size:13px; }}
   .warn {{ background:#fff6e0; border-left:4px solid #d99a00; }}
   .pending {{ background:#eef3ff; border-left:4px solid #3b6fd4; }}
@@ -170,6 +181,7 @@ def build_report(spec, results, warnings, out_dir, dry_run):
 <h1>QA 자동화 리포트 &mdash; {project}</h1>
 <div class="sub">{stamp} &middot; {base} {dry}</div>
 <div class="cards">{cards}</div>
+<div class="fltbar" id="fltbar"></div>
 {warn}{pending}
 {cases}
 <footer>
@@ -186,6 +198,28 @@ def build_report(spec, results, warnings, out_dir, dry_run):
   <div class="stage"><img id="lbimg" alt="" onclick="toggleFull(event)"></div>
 </div>
 <script>
+  // 요약 카드 클릭 -> 해당 상태만 보기. 같은 카드를 다시 누르면 해제.
+  var cur = null;
+  function flt(k) {{
+    cur = (cur === k) ? null : k;
+    document.querySelectorAll('.case').forEach(function (el) {{
+      el.hidden = cur !== null && el.dataset.status !== cur;
+    }});
+    document.querySelectorAll('.card').forEach(function (b) {{
+      b.classList.toggle('on', b.dataset.filter === cur);
+    }});
+    var bar = document.getElementById('fltbar');
+    if (cur === null) {{ bar.textContent = ''; return; }}
+    var n = document.querySelectorAll('.case:not([hidden])').length;
+    var label = document.querySelector('.card[data-filter="' + cur + '"] span').textContent;
+    bar.innerHTML = label + ' ' + n + '건만 보는 중' +
+      '<button type="button" id="fltclear">전체 보기</button>';
+    document.getElementById('fltclear').onclick = function () {{ flt(cur); }};
+  }}
+  document.querySelectorAll('.card').forEach(function (b) {{
+    b.addEventListener('click', function () {{ flt(b.dataset.filter); }});
+  }});
+
   var lb = document.getElementById('lb');
   function zoom(el) {{
     document.getElementById('lbimg').src = el.src;
