@@ -13,7 +13,8 @@
         "name": "OmniYoung"
       },
       "category": "testing",
-      "source": "./plugins/qa-test"
+      "source": "./plugins/qa-test",
+      "homepage": "https://github.com/OmniYoung/claude-skills/tree/main/plugins/qa-test"
     },
     {
       "name": "sb-storyboard",
@@ -21,8 +22,9 @@
       "author": {
         "name": "OmniYoung"
       },
-      "category": "documentation",
-      "source": "./plugins/sb-storyboard"
+      "category": "productivity",
+      "source": "./plugins/sb-storyboard",
+      "homepage": "https://github.com/OmniYoung/claude-skills/tree/main/plugins/sb-storyboard"
     },
     {
       "name": "sb-storyboard-figma",
@@ -30,8 +32,9 @@
       "author": {
         "name": "OmniYoung"
       },
-      "category": "documentation",
-      "source": "./plugins/sb-storyboard-figma"
+      "category": "productivity",
+      "source": "./plugins/sb-storyboard-figma",
+      "homepage": "https://github.com/OmniYoung/claude-skills/tree/main/plugins/sb-storyboard-figma"
     }
   ]
 }

@@ -5,10 +5,23 @@
 
 ## 설치
 
+**터미널 (Claude Code CLI)**
+
 ```bash
 claude plugin marketplace add OmniYoung/claude-skills
 claude plugin install qa-test@claude-skills
 ```
+
+**데스크탑 앱**
+
+사이드바 `사용자 지정` → `플러그인` → `추가` → `저장소에서 추가` 에 아래를 넣습니다.
+
+```
+OmniYoung/claude-skills
+```
+
+동기화되면 `qa-test`, `sb-storyboard`, `sb-storyboard-figma` 가 목록에 뜹니다. 설정은 터미널과
+공유되므로 어느 쪽에서 설치하든 양쪽에 다 반영됩니다.
 
 필요한 것만 골라 설치하면 됩니다.
 
@@ -64,6 +77,26 @@ claude plugin marketplace list         # 등록된 마켓플레이스 목록
 
 **설치가 실패한다** — 마켓플레이스가 등록돼 있는지(`claude plugin marketplace list`) 먼저 보고,
 없으면 `claude plugin marketplace add OmniYoung/claude-skills` 를 다시 실행합니다.
+
+**데스크탑 앱에서 "마켓플레이스 추가에 실패했습니다"** — 화면에는 이유가 안 나오니 로그를 봅니다.
+원인이 그대로 적혀 있습니다.
+
+```
+Windows  %LOCALAPPDATA%\Claude\Logs\main.log
+Mac      ~/Library/Logs/Claude/main.log
+```
+
+자주 나오는 건 이 오류입니다.
+
+```
+Cannot add marketplace "claude-skills": its network source differs from
+the one declared for it in settings ...
+```
+
+같은 이름의 마켓플레이스를 **다른 소스로 등록한 적이 있을 때** 납니다(예: 로컬 폴더로 먼저
+테스트한 경우). `~/.claude/settings.json` 의 `extraKnownMarketplaces` 에서 해당 이름을 지우고
+앱을 재시작한 뒤 다시 추가하면 됩니다. 입력 형식(`owner/repo` vs 전체 URL)을 바꿔도 소용없습니다 —
+앱이 항상 전체 URL 로 정규화해서 넘기기 때문입니다.
 
 **제거하려면**
 
