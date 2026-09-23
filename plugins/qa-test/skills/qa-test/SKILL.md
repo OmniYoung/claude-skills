@@ -39,10 +39,28 @@ description: 개발이 끝난 화면이 기획서대로 만들어졌는지 자�
 2. **기획 자료 경로** — 여러 개면 전부
 3. **범위** — 화면 전체인지 특정 기능만인지
 
+## $SKILL 경로 찾기
+
+`$SKILL` 은 이 SKILL.md 가 있는 폴더다. 러너는 `$SKILL/qa_auto/qa_run.py` 다.
+
+**사용자에게 이 경로를 묻지 않는다.** 설치 위치는 사람마다 다르고 본인도 모르는 게 정상이다.
+이 SKILL.md 를 읽은 실제 경로를 그대로 쓰고, 그게 불분명하면 직접 찾는다.
+
+```bash
+# 플러그인으로 설치된 경우 (대부분)
+ls ~/.claude/plugins/marketplaces/*/plugins/qa-test/skills/qa-test/qa_auto/qa_run.py
+# 스킬 폴더에 직접 둔 경우
+ls ~/.claude/skills/qa-test/qa_auto/qa_run.py
+```
+
+아래 명령들은 **Claude 가 절대경로를 채워서 직접 실행한다.** 사용자가 경로를 타이핑하게
+만들지 않는다. 단 `--login` 만은 예외로, 브라우저와 콘솔 입력이 필요해 사용자가 직접 돌려야 한다.
+
 ## 작업 폴더
 
 산출물은 **사용자 프로젝트**에 만든다. 스킬 폴더에는 아무것도 쓰지 않는다.
-그래서 작업을 시작할 때 이 명령을 먼저 돌린다.
+그래서 작업을 시작할 때 이 명령을 먼저 돌린다. 이미 `qa_auto/` 가 있으면 다시 돌려도 안전하다
+(기존 스펙·케이스는 건드리지 않고 `run_qa.bat` 만 현재 설치 경로로 새로 만든다).
 
 ```
 py "$SKILL/qa_auto/qa_run.py" --init <프로젝트_루트>
@@ -64,10 +82,11 @@ qa_auto/
 
 ## 로그인 처리
 
-로그인이 필요한 화면이면, **사용자에게 이 명령을 터미널에서 직접 실행하라고 안내한다.**
+로그인이 필요한 화면이면, **경로를 채운 명령을 만들어서 복사해 쓸 수 있게 건넨다.**
+`<로그인_URL>` 과 `<작업폴더>` 도 실제 값으로 바꿔서 준다 — 사용자가 고칠 게 없어야 한다.
 
 ```
-py "$SKILL/qa_auto/qa_run.py" --login <로그인_URL> --ws qa_auto
+py "C:\Users\...\qa-test\skills\qa-test\qa_auto\qa_run.py" --login https://admin.example.com/ --ws "D:\내프로젝트\qa_auto"
 ```
 
 브라우저가 열리고, 사용자가 평소처럼 로그인한 뒤 콘솔에서 Enter 를 누르면 세션이

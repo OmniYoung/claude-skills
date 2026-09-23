@@ -19,7 +19,7 @@ description: 확정된 Figma 화면 디자인으로부터 개발자용 화면설
    - 섹션/표/카드가 프레임 단위로 분리돼 있을 것 (컬럼 스펙 슬라이드는 프레임 하나를 통째로 캡처한다)
    - 인터랙션 상태(호버·편집중·저장완료·빈 상태 등)가 상태별로 각각 별도 프레임 또는 컴포넌트 variant로 존재할 것 — 네이밍 규칙이 있으면(`섹션명/상태명` 등) 먼저 물어본다
 2. **Figma Desktop 앱**이 해당 파일을 열어둔 상태 + Figma MCP 서버 연결(`get_metadata`/`get_screenshot`/`get_design_context`/`download_assets` 사용 가능해야 함). 연결이 안 돼 있으면 사용자에게 먼저 연결해달라고 안내한다.
-3. **재사용 모듈**: `pptx_sb/sb_helpers.py` — 이 스킬 패키지에 함께 포함돼 있어 **별도 설치가 필요 없다**. v1.6 하우스 스타일(파란 헤더 배지, 요약 박스, 번호 지시선, 컬럼 스펙 그리드, 인터랙션 상태 그리드, 표지, 버전 관리 표)이 전부 함수로 있다. 이 SKILL.md를 읽은 실제 경로를 기준으로 같은 폴더의 `pptx_sb/sb_helpers.py` 절대경로를 찾아 sys.path에 추가해서 import한다 — 예를 들어 이 파일이 `~/.claude/skills/sb-storyboard-figma/SKILL.md`에 설치돼 있다면 `~/.claude/skills/sb-storyboard-figma/pptx_sb`를 추가한다. **이 파일 자체는 수정하지 말고** import해서 콘텐츠만 채운다.
+3. **재사용 모듈**: `pptx_sb/sb_helpers.py` — 이 스킬 패키지에 함께 포함돼 있어 **별도 설치가 필요 없다**. v1.6 하우스 스타일(파란 헤더 배지, 요약 박스, 번호 지시선, 컬럼 스펙 그리드, 인터랙션 상태 그리드, 표지, 버전 관리 표)이 전부 함수로 있다. 이 SKILL.md를 읽은 실제 경로 기준으로 같은 폴더의 `pptx_sb/sb_helpers.py` 를 찾는다 (설치 위치는 사람마다 다르므로 **사용자에게 경로를 묻지 않는다**). **작업을 시작할 때 이 모듈을 `projects/{프로젝트}/sb_helpers.py` 로 복사한 뒤 그 사본을 import 한다** — 스킬 폴더의 원본을 직접 참조하지 않는다. 플러그인은 계속 갱신되므로, 과거에 승인된 SB 를 다시 빌드했을 때 결과가 달라지면 안 되기 때문이다. 플러그인을 제거해도 기존 빌드 스크립트가 살아있다. 이미 사본이 있으면 덮어쓰지 말고 그대로 쓴다. 사본이든 원본이든 **모듈 자체는 수정하지 말고** import 해서 콘텐츠만 채운다.
 4. **파이썬 의존성**: `python-pptx`, `Pillow`가 사용자 환경에 없으면 설치를 안내한다(`pip install python-pptx Pillow`).
 5. **Windows + PowerPoint** — 렌더 검증(PNG 내보내기)과 안전한 파일 닫기(`close_if_open`)가 PowerPoint COM 자동화로 동작한다. 없으면 이 두 기능만 빠지고 PPTX 생성 자체는 가능하다.
 6. 원 요구사항 문서(있으면) — SB 완성 후 반드시 원본 요구사항과 항목 단위로 대조한다. 부가 아이디어·수정 요청이 쌓여도 원본 요구사항 커버리지가 항상 최우선 기준이며, 업그레이드는 되어도 누락은 안 된다.
@@ -50,7 +50,11 @@ description: 확정된 Figma 화면 디자인으로부터 개발자용 화면설
 ### 4. 빌드 스크립트 작성
 ```python
 import sys
-sys.path.insert(0, r"<이 SKILL.md를 읽은 실제 경로>/pptx_sb")  # 예: ~/.claude/skills/sb-storyboard-figma/pptx_sb
+from pathlib import Path
+HERE = Path(__file__).parent
+# [프로젝트 전용 사본] sb_helpers 는 이 프로젝트 폴더 안에 있다.
+#   고쳐도 다른 프로젝트 SB 에는 영향이 없다 (프로젝트마다 사본을 둔다).
+sys.path.insert(0, str(HERE.parent))
 from sb_helpers import *
 
 prs = new_presentation()

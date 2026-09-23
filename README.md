@@ -107,9 +107,9 @@ py -m playwright install chromium
 
 **1) 작업 폴더 만들기** — 프로젝트마다 한 번만
 
-```bash
-py "<스킬경로>/qa_auto/qa_run.py" --init <프로젝트_루트>
-```
+Claude 에게 이렇게만 말하면 됩니다. 스킬 설치 경로는 알아서 찾습니다.
+
+> "qa-test 작업 폴더 만들어줘"
 
 `qa_auto/{specs, cases, fixtures, output}` 과 `run_qa.bat` 이 생깁니다.
 
@@ -151,9 +151,11 @@ py "<스킬경로>/qa_auto/qa_run.py" --init <프로젝트_루트>
 
 로그인이 필요한 화면이면 브라우저에서 직접 로그인해 세션을 저장합니다.
 
-```bash
-py "<스킬경로>/qa_auto/qa_run.py" --login <로그인_URL> --ws qa_auto
-```
+> "이 주소 로그인 세션 저장하게 명령어 만들어줘"
+
+라고 하면 경로가 채워진 명령을 주고, **그건 사용자가 터미널에서 직접 실행**합니다
+(브라우저 창과 콘솔 입력이 필요해 Claude 가 대신 못 돌립니다). 로그인을 마치고 콘솔에서
+Enter 를 누르면 `qa_auto/auth.json` 에 세션이 저장됩니다.
 
 > 생성되는 `auth.json` 에는 실제 로그인 세션이 들어갑니다. `--init` 이 `.gitignore` 를 같이
 > 만들지만, 커밋 전에 한 번 더 확인하세요.
