@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# 실행 산출물 (작업 폴더에서만 생성되지만 혹시 모를 사고 방지)
+auth.json
+cookies.txt
+cookies.json
+output/

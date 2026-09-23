@@ -1,0 +1,214 @@
+{
+  "meta": {
+    "project": "_스모크테스트",
+    "base_url": "{QA_ROOT}/fixtures",
+    "qa_prefix": "[QA]20260911",
+    "sources": [
+      "러너 자체 검증용 - 실제 기획 근거 없음"
+    ]
+  },
+  "blocklist": [
+    "text=발송",
+    "text=결제"
+  ],
+  "cases": [
+    {
+      "id": "TC-001",
+      "title": "목록 렌더링 - 상세관리 버튼 3개 노출",
+      "requirement": "조건을 만족하는 행에만 상세관리 버튼 노출",
+      "source": "스모크",
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "expect_visible",
+          "selector": "table.list"
+        },
+        {
+          "action": "expect_count",
+          "selector": "button.detail",
+          "count": 3
+        },
+        {
+          "action": "screenshot",
+          "name": "목록"
+        }
+      ]
+    },
+    {
+      "id": "TC-002",
+      "title": "일부러 실패시키는 케이스 (FAIL 경로 검증)",
+      "requirement": "존재하지 않는 문구를 기대하여 실패 리포팅을 확인",
+      "source": "스모크",
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "expect_text",
+          "selector": "#title",
+          "contains": "있을리없는문구"
+        }
+      ]
+    },
+    {
+      "id": "TC-003",
+      "title": "쓰기 미승인 케이스 (SKIP 경로 검증)",
+      "requirement": "사용여부를 사용함으로 전환 시 등록 영역 노출",
+      "source": "스모크",
+      "writes": true,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "check",
+          "selector": "#use-y"
+        }
+      ],
+      "cleanup": [
+        {
+          "action": "check",
+          "selector": "#use-n"
+        }
+      ]
+    },
+    {
+      "id": "TC-004",
+      "title": "승인된 쓰기 - 사이즈 불일치 이미지 업로드 시 반려 알럿",
+      "requirement": "실제 픽셀 사이즈가 고정 사이즈와 불일치 시 알럿 '이미지 사이즈가 맞지 않습니다.'",
+      "source": "스모크",
+      "writes": true,
+      "approved": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "check",
+          "selector": "#use-y"
+        },
+        {
+          "action": "expect_visible",
+          "selector": "#popup-form"
+        },
+        {
+          "action": "fill",
+          "selector": "#popup-url",
+          "value": "[QA]20260911-test"
+        },
+        {
+          "action": "upload",
+          "selector": "#popup-img",
+          "file": "wrong_size.png"
+        },
+        {
+          "action": "click",
+          "selector": "#save",
+          "label": "저장"
+        },
+        {
+          "action": "expect_dialog",
+          "contains": "이미지 사이즈가 맞지 않습니다"
+        },
+        {
+          "action": "screenshot",
+          "name": "반려알럿_후"
+        }
+      ],
+      "cleanup": [
+        {
+          "action": "check",
+          "selector": "#use-n"
+        },
+        {
+          "action": "expect_hidden",
+          "selector": "#popup-form"
+        }
+      ]
+    },
+    {
+      "id": "TC-005",
+      "title": "blocklist 차단 검증",
+      "requirement": "발송 버튼은 승인 여부와 무관하게 차단되어야 함",
+      "source": "스모크",
+      "writes": true,
+      "approved": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "click",
+          "selector": "#save",
+          "label": "알림톡 발송"
+        }
+      ],
+      "cleanup": [
+        {
+          "action": "wait",
+          "ms": 100
+        }
+      ]
+    },
+    {
+      "id": "TC-006",
+      "title": "cleanup 없는 쓰기 케이스 거부 검증",
+      "requirement": "쓰기 케이스는 cleanup이 없으면 실행 거부",
+      "source": "스모크",
+      "writes": true,
+      "approved": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "fill",
+          "selector": "#popup-url",
+          "value": "[QA]20260911-x"
+        }
+      ]
+    },
+    {
+      "id": "TC-007",
+      "title": "QA 프리픽스 없는 입력값 경고 검증",
+      "requirement": "테스트 입력값에는 QA 프리픽스가 포함되어야 함",
+      "source": "스모크",
+      "writes": true,
+      "approved": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "check",
+          "selector": "#use-y"
+        },
+        {
+          "action": "fill",
+          "selector": "#popup-url",
+          "value": "프리픽스없는값"
+        }
+      ],
+      "cleanup": [
+        {
+          "action": "check",
+          "selector": "#use-n"
+        }
+      ]
+    }
+  ]
+}

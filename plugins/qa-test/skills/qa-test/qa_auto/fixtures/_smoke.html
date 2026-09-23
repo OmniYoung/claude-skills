@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>스모크 테스트 페이지</title></head>
+<body>
+  <h1 id="title">샘플 상세관리</h1>
+  <table class="list">
+    <tr><td>샘플상품 A</td><td><button class="detail">상세관리</button></td></tr>
+    <tr><td>샘플상품 B</td><td><button class="detail">상세관리</button></td></tr>
+    <tr><td>샘플상품 C</td><td><button class="detail">상세관리</button></td></tr>
+  </table>
+
+  <div id="popup-area">
+    <label>사용여부</label>
+    <input type="radio" name="use" id="use-y" value="Y"> 사용함
+    <input type="radio" name="use" id="use-n" value="N" checked> 사용안함
+    <div id="popup-form" style="display:none">
+      <input type="text" id="popup-url" placeholder="연결 URL">
+      <input type="file" id="popup-img">
+    </div>
+  </div>
+
+  <button id="save">저장</button>
+  <button id="search">조회</button>
+
+  <script>
+    document.getElementById('use-y').onclick = () => document.getElementById('popup-form').style.display = 'block';
+    document.getElementById('use-n').onclick = () => document.getElementById('popup-form').style.display = 'none';
+    document.getElementById('save').onclick = () => alert('이미지 사이즈가 맞지 않습니다. (500×500 px로 등록해주세요.)');
+    document.getElementById('search').onclick = () => { document.getElementById('title').textContent = '조회 완료'; };
+  </script>
+</body></html>

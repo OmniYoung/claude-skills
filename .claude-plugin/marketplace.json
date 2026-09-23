@@ -1,0 +1,37 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-skills",
+  "description": "기획 업무용 Claude Code 스킬 모음 — 화면 QA 자동화, 화면설계 스토리보드 생성",
+  "owner": {
+    "name": "OmniYoung"
+  },
+  "plugins": [
+    {
+      "name": "qa-test",
+      "description": "개발이 끝난 화면이 기획서대로 만들어졌는지 자동 검수하고 HTML 리포트를 만든다. 기획서·Figma·스토리보드를 근거로 테스트 케이스를 뽑고, 실제 사이트에 셀렉터를 매핑해 Playwright로 실행한다. 운영 서버가 대상이어도 쓰기는 사람이 승인한 케이스만 실행한다.",
+      "author": {
+        "name": "OmniYoung"
+      },
+      "category": "testing",
+      "source": "./plugins/qa-test"
+    },
+    {
+      "name": "sb-storyboard",
+      "description": "확정된 HTML 화면 목업으로부터 개발자용 화면설계 스토리보드(SB, PPTX)를 만든다. 개발자가 목업을 열어보지 않아도 되는 수준으로 문서화한다.",
+      "author": {
+        "name": "OmniYoung"
+      },
+      "category": "documentation",
+      "source": "./plugins/sb-storyboard"
+    },
+    {
+      "name": "sb-storyboard-figma",
+      "description": "확정된 Figma 화면 디자인으로부터 개발자용 화면설계 스토리보드(SB, PPTX)를 만든다. node-id 가 포함된 Figma URL 을 받아 처리한다.",
+      "author": {
+        "name": "OmniYoung"
+      },
+      "category": "documentation",
+      "source": "./plugins/sb-storyboard-figma"
+    }
+  ]
+}
