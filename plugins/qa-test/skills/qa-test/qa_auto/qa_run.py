@@ -1019,7 +1019,8 @@ def main():
 
         browser.close()
 
-    report_path = build_report(spec, results, runner.warnings, out_dir, args.dry_run)
+    report_path = build_report(spec, results, runner.warnings, out_dir,
+                               args.dry_run, str(spec_path))
     passed = sum(1 for r in results if r["status"] == "PASS")
     failed = sum(1 for r in results if r["status"] == "FAIL")
     print("\n[*] 결과: 통과 {} / 실패 {} / 전체 {}".format(passed, failed, len(results)))

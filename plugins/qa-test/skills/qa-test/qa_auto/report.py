@@ -42,7 +42,41 @@ def _steps_block(r, steps):
         open=" open" if failed_at else "", s=_esc(summary), body="".join(steps))
 
 
-def _case_block(r):
+
+def _gate_block(r, spec_case, spec_path):
+    """승인 대기·차단 케이스에 붙는 안내.
+
+    "spec.json 에서 approved 를 바꾸세요" 처럼 적으면 그 파일이 어디 있는지 알 수가 없다.
+    실제 경로와 케이스 id 를 그대로 찍어서 바로 찾아갈 수 있게 한다.
+    """
+    if r["status"] == "SKIPPED":
+        cleanup = (spec_case or {}).get("cleanup") or []
+        steps = "".join("<li>{}</li>".format(
+            _esc("{} {}".format(s.get("action"), s.get("selector", s.get("url", "")))))
+            for s in cleanup)
+        return (
+            '<div class="gate">'
+            '<b>이 케이스는 운영 데이터를 씁니다.</b> 승인해야 실행됩니다.'
+            '<div class="gate-why">되돌리는 절차<ol class="gate-cleanup">{steps}</ol></div>'
+            '<div class="gate-how">승인하려면 아래 파일에서 <code>"id": "{cid}"</code> 를 찾아 '
+            '<code>"approved": true</code> 로 바꾸고 다시 실행합니다.'
+            '<div class="gate-path">{path}</div>'
+            'Claude 를 쓰는 중이면 <b>"{cid} 승인해줘"</b> 라고 해도 됩니다.</div></div>'
+        ).format(cid=_esc(r["id"]), steps=steps or "<li>(없음)</li>", path=_esc(spec_path or "specs/*.json"))
+
+    if r["status"] == "BLOCKED":
+        if "blocklist" in r["reason"]:
+            why = ('이 버튼은 <b>의도적으로 막아둔 것</b>입니다. 승인 여부와 무관하게 차단됩니다. '
+                   '정말 필요하면 스펙의 <code>blocklist</code> 에서 직접 빼야 합니다.')
+        else:
+            why = ('쓰기 케이스인데 <b>정리(cleanup) 절차가 없습니다.</b> 만든 데이터를 되돌릴 '
+                   '방법을 스펙에 넣어야 실행됩니다.')
+        return '<div class="gate gate-blocked">{}<div class="gate-path">{}</div></div>'.format(
+            why, _esc(spec_path or "specs/*.json"))
+    return ""
+
+
+def _case_block(r, spec_case=None, spec_path=None):
     label, color, bg = STATUS_META[r["status"]]
 
     steps = []
@@ -76,9 +110,11 @@ def _case_block(r):
     <dt>근거</dt><dd class="src">{src}</dd>
     {reason}
   </dl>
+  {gate_html}
   {steps_html}
   {shots_html}
 </section>""".format(
+        gate_html=_gate_block(r, spec_case, spec_path),
         color=color, bg=bg, label=label, status=r["status"],
         id=_esc(r["id"]), title=_esc(r["title"]), dur=r["duration"],
         req=_esc(r["requirement"]), src=_esc(r["source"]),
@@ -88,9 +124,10 @@ def _case_block(r):
     )
 
 
-def build_report(spec, results, warnings, out_dir, dry_run):
+def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None):
     meta = spec["meta"]
     counts = {k: sum(1 for r in results if r["status"] == k) for k in STATUS_META}
+    by_id = {c["id"]: c for c in spec.get("cases", [])}
 
     cards = "".join(
         '<button class="card" data-filter="{k}" '
@@ -113,10 +150,11 @@ def build_report(spec, results, warnings, out_dir, dry_run):
                 _esc(r["id"]), _esc(r["title"]), _esc(r["reason"]))
             for r in pending)
         pend_html = (
-            '<div class="pending"><b>승인 대기 {}건</b>'
-            '<p>쓰기가 필요한 케이스입니다. 검토 후 spec.json에서 해당 케이스의 '
-            '<code>"approved": true</code>로 바꾸고 재실행하세요.</p><ul>{}</ul></div>'
-        ).format(len(pending), items)
+            '<div class="pending"><b>승인 대기 {n}건</b>'
+            '<p>쓰기가 필요해 실행하지 않았습니다. 아래 스펙 파일에서 해당 케이스의 '
+            '<code>"approved": true</code> 로 바꾸고 다시 실행하세요.</p>'
+            '<div class="gate-path">{path}</div><ul>{items}</ul></div>'
+        ).format(n=len(pending), path=_esc(spec_path or "specs/*.json"), items=items)
 
     sources = "".join("<li>{}</li>".format(_esc(s)) for s in meta.get("sources", []))
 
@@ -145,6 +183,19 @@ def build_report(spec, results, warnings, out_dir, dry_run):
   .fltbar button {{ background:none; border:0; color:#3b6fd4; cursor:pointer;
                     font:inherit; text-decoration:underline; padding:0 0 0 6px; }}
   .case[hidden] {{ display:none; }}
+  .gate {{ background:#fff6e0; border:1px solid #f0d488; border-radius:6px;
+           padding:12px 14px; margin:0 0 12px; font-size:13px; }}
+
+  .gate-why {{ color:#6b5200; font-size:12px; margin-top:6px; }}
+  .gate-cleanup {{ margin:4px 0 0; padding-left:20px; color:#4b5563; }}
+  .gate-how {{ font-size:12px; margin-top:8px; color:#6b5200; }}
+  .gate-path {{ font-family:Consolas,monospace; font-size:11.5px; color:#1c1f23;
+                background:#fff; border:1px solid #e3e6ea; border-radius:4px;
+                padding:5px 8px; margin:5px 0; word-break:break-all; }}
+
+
+  .gate-blocked {{ background:#eeebfa; border-color:#c9c0ee; color:#3f3577; }}
+
   .warn, .pending {{ padding:16px; border-radius:8px; margin-bottom:20px; font-size:13px; }}
   .warn {{ background:#fff6e0; border-left:4px solid #d99a00; }}
   .pending {{ background:#eef3ff; border-left:4px solid #3b6fd4; }}
@@ -280,7 +331,7 @@ def build_report(spec, results, warnings, out_dir, dry_run):
         base=_esc(meta["base_url"]),
         dry='<span class="drytag">DRY-RUN (쓰기 없음)</span>' if dry_run else "",
         cards=cards, warn=warn_html, pending=pend_html,
-        cases="".join(_case_block(r) for r in results),
+        cases="".join(_case_block(r, by_id.get(r["id"]), spec_path) for r in results),
         sources=sources,
     )
 
