@@ -29,6 +29,15 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+# 한국어 윈도우 콘솔은 기본이 cp949 라, 케이스 제목이나 실패 사유에 들어간
+# "—" "·" "※" 같은 문자에서 출력 단계가 죽는다. 리포트(UTF-8)는 멀쩡한데
+# 콘솔 print 하나 때문에 실행 전체가 중단되므로 진입점에서 맞춰둔다.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).parent))
 from report import build_report
 
@@ -259,7 +268,11 @@ class Runner:
             # locator.hover()는 셀 안 인라인 span에서 hit-test를 오판해 타임아웃이 난다.
             # 요소 중심 좌표로 직접 마우스를 옮기는 방식이 안정적이다.
             loc = self.page.locator(sel).first
+            # scroll_into_view_if_needed 는 "보이기만 하면" 멈춘다. 요소가 뷰포트
+            # 하단에 걸쳐 있으면 아래로 열리는 툴팁이 렌더 영역 밖이라 거짓 실패가 난다.
             loc.scroll_into_view_if_needed(timeout=step.get("timeout", 10000))
+            loc.evaluate("e => e.scrollIntoView({block:'center', inline:'center'})")
+            self.page.wait_for_timeout(150)
             box = loc.bounding_box()
             if not box:
                 raise StepFailure("호버 대상의 위치를 잡을 수 없음: {}".format(sel))
@@ -357,6 +370,40 @@ class Runner:
 
 # -- 케이스 실행 ------------------------------------------------
 
+INTERACTION_ACTIONS = {"click", "fill", "select", "check", "uncheck", "upload", "hover"}
+
+
+def diagnose_chain(runner, case, result):
+    """chains 케이스가 실패했을 때, 이어서 해서 깨진 건지 원래 깨진 건지 가린다.
+
+    실패한 스텝을 **직전 동작 하나만 앞세워** 새 페이지에서 다시 밟아본다.
+    통과하면 앞선 동작들이 남긴 상태가 원인이고, 그대로 실패하면 기능 자체 문제다.
+    앞선 동작이 없으면(= 이미 최소 단위) 가릴 게 없으니 아무것도 하지 않는다.
+    """
+    steps = case["steps"]
+    failed = next((s["n"] for s in result["steps"]
+                   if s["phase"] == "test" and s["status"] == "FAIL"), None)
+    if not failed:
+        return None
+    idx = failed - 1                                   # 실패 스텝의 0-기반 위치
+
+    first_goto = next((s for s in steps if s.get("action") == "goto"), None)
+    last_act = next((i for i in range(idx - 1, -1, -1)
+                     if steps[i].get("action") in INTERACTION_ACTIONS), None)
+    if first_goto is None or last_act is None:
+        return None                                    # 되짚을 선행 동작이 없다
+
+    # 직전 동작 ~ 실패 스텝까지(사이의 wait 등 포함). 그 앞의 동작들은 일부러 뺀다.
+    replay = [first_goto] + steps[last_act:idx + 1]
+    try:
+        for n, st in enumerate(replay, 1):
+            runner.run(st, case["id"] + "_solo", n)
+    except Exception:
+        # 마지막 스텝에서 깨졌으면 단독으로도 실패, 앞에서 깨졌으면 판정 불가
+        return "단독 재현: 실패 → 연속 사용과 무관한 결함" if st is replay[-1] else None
+    return "단독 재현: 통과 → 이어서 조작할 때만 발생"
+
+
 def run_case(runner, case, blocklist, dry_run):
     """케이스 하나 실행. 결과 dict 반환."""
     cid = case["id"]
@@ -429,6 +476,12 @@ def run_case(runner, case, blocklist, dry_run):
             runner._shoot("{}_FAIL".format(cid))
         except Exception:
             pass
+        # chains 케이스는 "이어서 했기 때문인지" 를 자동으로 가린다
+        if case.get("chains"):
+            diag = diagnose_chain(runner, case, result)
+            if diag:
+                result["diagnosis"] = diag
+                result["reason"] += "  [{}]".format(diag)
 
     # -- 정리(cleanup)는 본 테스트 실패와 무관하게 항상 시도 --
     if case.get("cleanup") and not dry_run and case.get("approved"):
