@@ -20,6 +20,28 @@ def _esc(s):
     return html.escape(str(s or ""))
 
 
+def _steps_block(r, steps):
+    """스텝 목록은 접어둔다.
+
+    `goto`·`wait` 는 모든 케이스에 똑같이 들어가는 배경 소음이라, 펼쳐두면 정작 봐야 할
+    실패가 통과 스텝 사이에 묻힌다. 실패한 케이스만 펼친 채로 둔다 — 어디서 깨졌는지가
+    핵심 정보이기 때문이다.
+    """
+    if not steps:
+        return ""
+    total = len(r["steps"])
+    failed_at = next((s["n"] for s in r["steps"] if s["status"] == "FAIL"), None)
+    if failed_at:
+        summary = "스텝 {}개 · {}번째에서 실패".format(total, failed_at)
+    elif any(s["status"] == "SKIP" for s in r["steps"]):
+        n = sum(1 for s in r["steps"] if s["status"] == "SKIP")
+        summary = "스텝 {}개 · {}개 건너뜀".format(total, n)
+    else:
+        summary = "스텝 {}개 · 전부 통과".format(total)
+    return '<details class="stepbox"{open}><summary>{s}</summary><ol class="steps">{body}</ol></details>'.format(
+        open=" open" if failed_at else "", s=_esc(summary), body="".join(steps))
+
+
 def _case_block(r):
     label, color, bg = STATUS_META[r["status"]]
 
@@ -61,7 +83,7 @@ def _case_block(r):
         id=_esc(r["id"]), title=_esc(r["title"]), dur=r["duration"],
         req=_esc(r["requirement"]), src=_esc(r["source"]),
         reason='<dt>사유</dt><dd class="reason">{}</dd>'.format(_esc(r["reason"])) if r["reason"] else "",
-        steps_html='<ol class="steps">{}</ol>'.format("".join(steps)) if steps else "",
+        steps_html=_steps_block(r, steps),
         shots_html='<div class="shots">{}</div>'.format(shots) if shots else "",
     )
 
@@ -140,6 +162,11 @@ def build_report(spec, results, warnings, out_dir, dry_run):
   dd {{ margin:0; }}
   .src {{ color:#6b7280; font-size:12px; }}
   .reason {{ color:#c0362c; }}
+  .stepbox {{ margin:0 0 4px; }}
+  .stepbox > summary {{ cursor:pointer; font-size:12px; color:#6b7280;
+                        padding:4px 0; list-style-position:outside; }}
+  .stepbox > summary:hover {{ color:#1c1f23; }}
+  .stepbox[open] > summary {{ margin-bottom:6px; }}
   .steps {{ margin:0; padding-left:22px; font-size:12.5px; color:#374151; }}
   .steps li {{ padding:2px 0; }}
   .steps code {{ font-weight:700; margin-right:4px; }}

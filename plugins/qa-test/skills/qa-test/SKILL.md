@@ -102,8 +102,11 @@ qa_auto/
 py "C:\Users\...\qa-test\skills\qa-test\qa_auto\qa_run.py" --login https://admin.example.com/ --ws "D:\내기획\qa_auto"
 ```
 
-브라우저가 열리면 로그인하고 콘솔로 돌아와 Enter. 세션이 `qa_auto/auth.json` 에 저장된다.
-스펙 `meta` 에 `"auth": "auth.json"` 을 넣는다.
+브라우저가 열리면 로그인하고 **창을 그냥 닫으면** 저장된다. 콘솔로 돌아갈 필요가 없다.
+세션은 `qa_auto/auth.json` 에 들어가고, 스펙 `meta` 에 `"auth": "auth.json"` 을 넣는다.
+
+`--init` 이 `login_qa.bat` 도 만들어두므로, **터미널을 아예 안 쓰는 사람에게는 그 파일
+더블클릭**을 안내해도 된다 (주소만 입력하면 된다).
 
 **B. 쿠키 붙여넣기** — 명령 실행이 없다. 이미 로그인된 브라우저에서
 `F12 > Application > Cookies > <대상 도메인>` 표를 통째로 복사해 `qa_auto/cookies.txt` 에
@@ -213,6 +216,13 @@ py "C:\Users\...\qa-test\skills\qa-test\qa_auto\qa_run.py" --login https://admin
   실패는 실패를 놓치는 게 아니라 통과라고 잘못 보고하는 것이다.
 - 툴팁이 `title` 속성이 아니라 JS로 생성되는 경우가 많다. `hover` 액션으로 띄운 뒤 실제 툴팁
   요소를 `expect_text` 로 검사한다.
+- **결함 증빙 스크린샷은 문제 지점만 찍지 않는다.** `screenshot` 에 `selector` 와 `context` 를 주어
+  주변 정상 행·헤더가 같이 담기게 한다. 전체 화면 한 장으로는 수백 행 중 어디가 문제인지 아무도
+  못 찾는다.
+- 인라인 편집은 `dblclick` → `type` → `press Enter` 로 밟는다. `fill` 은 더블클릭 이후에 생기는
+  input 을 못 잡는다.
+- 엑셀 내보내기는 `download` + `expect_file` 로 검증한다. 기대 행수는 `row_count_js` 로 화면에서
+  읽어 비교한다 — 운영 데이터는 계속 바뀌므로 고정값을 박을 수 없다.
 
 ### 검증
 

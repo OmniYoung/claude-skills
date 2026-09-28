@@ -113,7 +113,9 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 |---|---|---|
 | `goto` | `url` | 페이지 이동 (상대경로면 base_url 결합) |
 | `wait` | `ms` 또는 `selector` | 대기 |
-| `screenshot` | `name` | 스크린샷 저장 (리포트에 첨부) |
+| `screenshot` | `name`, `selector`, `context`, `include_header`, `padding` | 스크린샷. `selector` 를 주면 그 지점만 잘라 찍는다 (아래 참고) |
+| `download` | `selector`, `save_as`, `timeout` | 클릭해서 파일을 받아 `output/<실행폴더>/downloads/` 에 저장 |
+| `expect_file` | `file`, `headers`, `min_rows`, `row_count_js` | 받아둔 파일의 헤더·행수를 검증 (xlsx·csv·HTML표) |
 | `hover` | `selector`, `ms` | 요소 위로 마우스 이동 (툴팁 검증용). 셀 안 인라인 span에서 `hover()`가 오판하므로 좌표 이동으로 처리 |
 | `expect_visible` | `selector` | 요소가 보이는가 |
 | `expect_hidden` | `selector` | 요소가 숨겨졌는가 |
@@ -124,27 +126,55 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 | `expect_no_dialog` | - | 직전 액션에서 알럿이 없어야 함 |
 | `expect_js` | `js`, `equals`(기본 true), `desc` | JS 평가 결과 비교. CSS로 표현 못 하는 판정(노출 순서·계산값)에만 쓴다 |
 
+`{ok, detail}` 을 돌려주면 `ok` 로 판정하고 `detail` 을 실패 사유에 그대로 싣는다.
+기대값이 데이터에 따라 변해 `equals` 에 못 박는 경우(건수 비교 등)에 쓴다 — 불리언만 쓰면
+`기대:True / 실제:False` 로 남아 개발팀에 그대로 못 보낸다.
+
+```json
+{"action": "expect_js", "desc": "임박재고 칩 건수 = 임박+긴급 행 수",
+ "js": "()=>{const a=..., b=...; return {ok: a===b, detail: `칩 ${a}건 / 행 ${b}건`};}"}
+```
+
 > `expect_js`는 **읽기 전용만 허용**한다. `.click(`, `.value =`, `fetch(`, `localStorage`, `dispatchEvent` 등
 > 변경성 패턴이 들어 있으면 러너가 실행을 거부한다 — 임의 JS로 쓰기 승인 게이트를 우회하지 못하게 하기 위함이다.
+
+### 결함 증빙 스크린샷
+
+전체 화면만 찍으면 수백 행짜리 표에서 **문제 지점을 찾을 수가 없다.** `selector` 로 범위를 좁히고,
+주변 정상 행을 같이 담아 "이 행만 다르다"가 보이게 한다.
+
+```json
+{"action": "screenshot", "name": "반품정책_결함",
+ "selector": ".row[data-code='25692']",
+ "context": {"above": 2, "below": 2, "selector": ".row"},
+ "include_header": ".table__head", "padding": 10}
+```
+
+`clip` 으로 잘라내므로 마우스를 움직이지 않는다 — **직전 `hover` 로 띄운 툴팁이 살아 있다.**
+`selector` 가 없으면 기존처럼 전체 화면을 찍는다.
 
 ### 쓰기 (승인 필요)
 
 | action | 필드 | 동작 |
 |---|---|---|
-| `fill` | `selector`, `value` | 입력 |
+| `fill` | `selector`, `value` | 입력 (기존 값을 지우고 한 번에 넣음) |
+| `type` | `selector`, `text`, `clear`, `delay` | 한 글자씩 입력. 글자수 제한처럼 **입력 중** 동작하는 검증에 쓴다 |
 | `select` | `selector`, `value` | 드롭다운 선택 |
 | `check` / `uncheck` | `selector` | 체크박스·라디오 |
 | `upload` | `selector`, `file` | 파일 업로드 (`fixtures/` 기준 상대경로) |
 | `click` | `selector` | 클릭 — 아래 규칙으로 쓰기 여부 자동 판정 |
+| `dblclick` | `selector` | 더블클릭. 인라인 편집 진입용 — `fill` 은 더블클릭 **이후에** 생기는 input 을 못 잡는다 |
+| `press` | `key`, `selector`(선택) | 키 입력. `Enter` 는 쓰기, `Escape`·`Tab`·방향키는 읽기로 본다 |
 
 ---
 
 ## 쓰기 판정 규칙 (러너가 강제)
 
-1. action이 `fill`/`select`/`check`/`uncheck`/`upload` → **무조건 쓰기**
-2. action이 `click`인데 셀렉터·텍스트에 `저장·확인·등록·추가·삭제·수정·전송·발송·적용·완료`가 포함 → **쓰기로 자동 승격**
-3. 스텝에 `"write": true`가 명시 → 쓰기
-4. 스텝에 `"write": false`가 명시 → 2번 자동 승격을 해제 (예: "확인" 텍스트가 들어간 단순 조회 버튼)
+1. action이 `fill`/`type`/`select`/`check`/`uncheck`/`upload` → **무조건 쓰기**
+2. action이 `click`/`dblclick`인데 셀렉터·텍스트에 `저장·확인·등록·추가·삭제·수정·전송·발송·적용·완료`가 포함 → **쓰기로 자동 승격**
+3. action이 `press` 인데 `key` 가 `Escape`·`Tab`·방향키가 아니면 → 쓰기
+4. 스텝에 `"write": true`가 명시 → 쓰기
+5. 스텝에 `"write": false`가 명시 → 자동 승격을 해제 (예: "확인" 텍스트가 들어간 단순 조회 버튼)
 
 쓰기 스텝인데 케이스가 `approved:false`거나 `--dry-run`이면 → 해당 케이스 **SKIPPED**, 리포트에 "승인 대기"로 표기.
 

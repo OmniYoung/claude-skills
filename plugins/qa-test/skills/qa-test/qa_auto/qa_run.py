@@ -21,6 +21,7 @@ QA 자동화 러너 - spec.json을 읽어 실제 사이트에서 테스트를 �
 
 import argparse
 import json
+import pathlib
 import re
 import sys
 import time
@@ -61,13 +62,13 @@ def find_fixture(workspace, name):
             name, workspace / "fixtures", SKILL_DIR / "fixtures"))
 
 # -- 쓰기 판정 --------------------------------------------------
-WRITE_ACTIONS = {"fill", "select", "check", "uncheck", "upload"}
+WRITE_ACTIONS = {"fill", "type", "select", "check", "uncheck", "upload"}
 WRITE_HINTS = ["저장", "확인", "등록", "추가", "삭제", "수정", "전송", "발송", "적용", "완료"]
 READ_ACTIONS = {
     "goto", "wait", "screenshot", "hover",
     "expect_visible", "expect_hidden", "expect_text",
     "expect_count", "expect_attr", "expect_dialog", "expect_no_dialog",
-    "expect_js",
+    "expect_js", "download", "expect_file",
 }
 
 # expect_js 는 읽기 전용이어야 한다. 아래 패턴이 보이면 실행을 거부해
@@ -78,7 +79,11 @@ JS_MUTATION_PATTERNS = [
     "localStorage", "sessionStorage", "document.cookie", "location=", "location.href",
     "dispatchEvent", "eval(",
 ]
-ALL_ACTIONS = WRITE_ACTIONS | READ_ACTIONS | {"click"}
+ALL_ACTIONS = WRITE_ACTIONS | READ_ACTIONS | {"click", "dblclick", "press"}
+
+# press 로 누르는 키 중 상태를 바꾸지 않는 것들. 나머지(Enter 등)는 쓰기로 본다.
+READ_KEYS = {"escape", "tab", "arrowup", "arrowdown", "arrowleft", "arrowright",
+             "pageup", "pagedown", "home", "end", "shift+tab"}
 
 DEFAULT_VIEWPORT = {"width": 1600, "height": 900}
 
@@ -90,9 +95,11 @@ def is_write_step(step):
         return bool(step["write"])
     if action in WRITE_ACTIONS:              # 규칙 1
         return True
-    if action == "click":                    # 규칙 2 - 텍스트 힌트로 자동 승격
+    if action in ("click", "dblclick"):       # 규칙 2 - 텍스트 힌트로 자동 승격
         target = "{} {}".format(step.get("selector", ""), step.get("label", ""))
         return any(hint in target for hint in WRITE_HINTS)
+    if action == "press":                     # Enter 는 저장, Esc·Tab 등은 이동일 뿐
+        return step.get("key", "").lower() not in READ_KEYS
     return False
 
 
@@ -179,6 +186,45 @@ def _cookies_from_devtools(text, path):
     return out
 
 
+# -- 다운로드 파일 읽기 -----------------------------------------
+
+def read_table(path):
+    """다운로드한 표 파일을 [[셀,...], ...] 로 읽는다.
+
+    .xlsx 는 openpyxl, csv/tsv 는 구분자 분리, .xls 는 서버가 HTML 표를 그 확장자로
+    내보내는 경우가 흔해서 태그를 벗겨 읽는다.
+    """
+    raw = path.read_bytes()
+    suffix = path.suffix.lower()
+
+    if raw[:2] == b"PK" and suffix in (".xlsx", ".xlsm"):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            raise StepFailure(
+                "xlsx 를 읽으려면 openpyxl 이 필요하다: pip install openpyxl")
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        rows = [["" if c is None else str(c).strip() for c in r]
+                for r in ws.iter_rows(values_only=True)]
+        wb.close()
+        return rows
+
+    text = raw.decode("utf-8-sig", errors="replace")
+    if "<table" in text.lower():                      # HTML 표를 .xls 로 내보낸 경우
+        rows = []
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", text, re.S | re.I):
+            cells = [re.sub(r"<[^>]+>", "", c).replace("&nbsp;", " ").strip()
+                     for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S | re.I)]
+            if cells:
+                rows.append(cells)
+        return rows
+
+    sep = "\t" if "\t" in text.split("\n")[0] else ","
+    return [[c.strip().strip('"') for c in line.split(sep)]
+            for line in text.splitlines() if line.strip()]
+
+
 # -- 스텝 실행 --------------------------------------------------
 
 class StepFailure(Exception):
@@ -199,6 +245,7 @@ class Runner:
         self.dialogs = []          # 직전 액션이 띄운 알럿 버퍼
         self.warnings = []
         self.shots = []
+        self.files = {}   # download 로 받은 파일
         page.on("dialog", self._on_dialog)
 
     def _on_dialog(self, dialog):
@@ -226,15 +273,92 @@ class Runner:
                 "로그인 세션이 만료된 것으로 보인다 (현재 URL: {}). "
                 "인증 파일을 갱신한 뒤 다시 실행할 것.".format(self.page.url))
 
+    def _warn_prefix(self, value, case_id, idx):
+        """테스트로 만든 데이터인지 눈으로 구분되게 QA 프리픽스를 권한다.
+
+        검색어 입력처럼 프리픽스가 없어야 정상인 경우도 있어 차단은 하지 않고 경고만 남긴다.
+        """
+        if (self.qa_prefix and len(value) >= 2 and self.qa_prefix not in value
+                and not value.replace(".", "").isdigit()):
+            self.warnings.append(
+                "{} 스텝{}: 입력값 '{}'에 QA 프리픽스({})가 없음 - 운영 데이터 오염 주의".format(
+                    case_id, idx, value, self.qa_prefix))
+
     def _url(self, url):
         return url if url.startswith("http") else self.base_url + "/" + url.lstrip("/")
 
-    def _shoot(self, name):
+    def _shoot(self, name, step=None):
+        """스크린샷. step 에 selector 가 있으면 그 지점만 잘라 찍는다.
+
+        전체 화면만 찍으면 수백 행짜리 표에서 문제 행을 찾을 수가 없어 결함 증빙이 안 된다.
+        clip 으로 잘라내므로 마우스를 움직이지 않는다 - 호버로 띄운 툴팁이 살아 있다.
+        """
         safe = re.sub(r'[\\/:*?"<>|]', "_", name)
         path = self.shot_dir / (safe + ".png")
-        self.page.screenshot(path=str(path), full_page=True)
+        clip = self._clip_for(step) if step else None
+        if clip:
+            self.page.screenshot(path=str(path), clip=clip)
+        else:
+            self.page.screenshot(path=str(path), full_page=True)
         self.shots.append(path.name)
         return path.name
+
+    def _clip_for(self, step):
+        """selector + 주변 맥락(context/include_header)을 감싸는 사각형을 구한다."""
+        sel = step.get("selector")
+        if not sel:
+            return None
+        target = self.page.locator(sel).first
+        try:
+            target.scroll_into_view_if_needed(timeout=5000)
+            self.page.wait_for_timeout(120)
+            b = target.bounding_box()
+        except Exception:
+            return None
+        if not b:
+            return None
+        boxes = [b]
+
+        # 위아래 정상 행을 같이 담아야 "이 행만 다르다"가 보인다
+        ctx = step.get("context")
+        if ctx:
+            sib = ctx.get("selector", sel)
+            try:
+                pos, total = self.page.evaluate(
+                    """([sel, sib]) => {
+                        const all = Array.from(document.querySelectorAll(sib));
+                        const t = document.querySelector(sel);
+                        return [all.indexOf(t), all.length];
+                    }""", [sel, sib])
+            except Exception:
+                pos, total = -1, 0
+            if pos >= 0:
+                lo = max(0, pos - int(ctx.get("above", 0)))
+                hi = min(total - 1, pos + int(ctx.get("below", 0)))
+                for i in (lo, hi):
+                    try:
+                        nb = self.page.locator(sib).nth(i).bounding_box()
+                        if nb:
+                            boxes.append(nb)
+                    except Exception:
+                        pass
+
+        if step.get("include_header"):
+            try:
+                hb = self.page.locator(step["include_header"]).first.bounding_box()
+                if hb:
+                    boxes.append(hb)
+            except Exception:
+                pass
+
+        pad = int(step.get("padding", 8))
+        x0 = min(v["x"] for v in boxes) - pad
+        y0 = min(v["y"] for v in boxes) - pad
+        x1 = max(v["x"] + v["width"] for v in boxes) + pad
+        y1 = max(v["y"] + v["height"] for v in boxes) + pad
+        vw = self.page.viewport_size or {"width": 1600, "height": 900}
+        return {"x": max(0, x0), "y": max(0, y0),
+                "width": min(x1 - x0, vw["width"]), "height": y1 - y0}
 
     def run(self, step, case_id, idx):
         action = step.get("action")
@@ -257,12 +381,77 @@ class Runner:
             else:
                 self.page.wait_for_timeout(step.get("ms", 1000))
 
+        elif action == "download":
+            # 엑셀 내보내기는 관리자 화면 단골 요건인데 "자동화 불가"로 빠지기 쉽다.
+            # 받아서 파싱하면 행수·컬럼·순서까지 화면과 대조된다.
+            dl_dir = self.shot_dir.parent / "downloads"
+            dl_dir.mkdir(parents=True, exist_ok=True)
+            with self.page.expect_download(timeout=step.get("timeout", 120000)) as info:
+                self.page.click(sel, timeout=step.get("click_timeout", 10000))
+            dl = info.value
+            name = step.get("save_as") or dl.suggested_filename or "download"
+            if "." not in name:
+                name += pathlib.PurePath(dl.suggested_filename or "x.bin").suffix
+            target = dl_dir / re.sub(r'[\\/:*?"<>|]', "_", name)
+            dl.save_as(str(target))
+            self.files[step.get("save_as") or name] = target
+            return None
+
+        elif action == "expect_file":
+            key = step["file"]
+            path = self.files.get(key)
+            if path is None or not path.exists():
+                raise StepFailure("받아둔 파일이 없음: {} (download 스텝이 먼저 와야 한다)".format(key))
+            rows = read_table(path)
+            if not rows:
+                raise StepFailure("파일에서 행을 못 읽음: {}".format(path.name))
+
+            if step.get("headers"):
+                got = [c.replace(" ", "") for c in rows[0]]
+                want = [c.replace(" ", "") for c in step["headers"]]
+                if got[:len(want)] != want:
+                    raise StepFailure("헤더 불일치 - 기대:{} / 실제:{}".format(want, got[:len(want)]))
+
+            body = len(rows) - (1 if step.get("headers") else 0)
+            if "min_rows" in step and body < step["min_rows"]:
+                raise StepFailure("행 수 미달 - 기대:{}행 이상 / 실제:{}행".format(step["min_rows"], body))
+            if "row_count_js" in step:
+                # 운영 데이터는 계속 바뀌므로 기대값을 화면에서 읽어 비교한다
+                expected = self.page.evaluate(step["row_count_js"])
+                if body != expected:
+                    raise StepFailure(
+                        "행 수 불일치 - 화면 {}행 / 파일 {}행".format(expected, body))
+            return None
+
         elif action == "screenshot":
-            return self._shoot("{}_{:02d}_{}".format(case_id, idx, step.get("name", "shot")))
+            return self._shoot("{}_{:02d}_{}".format(case_id, idx, step.get("name", "shot")), step)
 
         elif action == "click":
             self.page.click(sel, timeout=step.get("timeout", 10000))
             self.page.wait_for_timeout(500)
+
+        elif action == "dblclick":
+            # 인라인 편집은 보통 더블클릭으로 input 이 생긴다. fill 은 그 input 을
+            # 먼저 찾아야 해서 진입 자체가 안 되므로 별도 액션이 필요하다.
+            self.page.dblclick(sel, timeout=step.get("timeout", 10000))
+            self.page.wait_for_timeout(400)
+
+        elif action == "press":
+            key = step["key"]
+            if sel:
+                self.page.press(sel, key, timeout=step.get("timeout", 10000))
+            else:
+                self.page.keyboard.press(key)
+            self.page.wait_for_timeout(400)
+
+        elif action == "type":
+            # fill 과 달리 기존 값을 지우지 않고 키 입력을 흉내낸다.
+            # 글자수 제한처럼 입력 중 동작하는 검증에는 이쪽이 맞다.
+            value = step.get("text", "")
+            self._warn_prefix(value, case_id, idx)
+            if step.get("clear"):
+                self.page.fill(sel, "")
+            self.page.type(sel, value, delay=step.get("delay", 20))
 
         elif action == "hover":
             # locator.hover()는 셀 안 인라인 span에서 hit-test를 오판해 타임아웃이 난다.
@@ -281,12 +470,7 @@ class Runner:
 
         elif action == "fill":
             value = step.get("value", "")
-            if (self.qa_prefix and len(value) >= 2 and self.qa_prefix not in value
-                    and not value.replace(".", "").isdigit()):
-                self.warnings.append(
-                    "{} 스텝{}: 입력값 '{}'에 QA 프리픽스({})가 없음 - 운영 데이터 오염 주의".format(
-                        case_id, idx, value, self.qa_prefix)
-                )
+            self._warn_prefix(value, case_id, idx)
             self.page.fill(sel, value)
 
         elif action == "select":
@@ -360,6 +544,18 @@ class Runner:
                     raise StepFailure(
                         "expect_js 는 읽기 전용만 허용 - 금지 패턴 '{}' 발견".format(bad))
             value = self.page.evaluate(js)
+
+            # {ok, detail} 을 돌려주면 ok 로 판정하고 detail 을 사유에 그대로 싣는다.
+            # 기대값이 데이터에 따라 변해 equals 에 못 박는 경우(건수 비교 등)를 위한 것 —
+            # 불리언만 쓰면 "기대:True / 실제:False" 로 남아 개발팀에 그대로 못 보낸다.
+            if isinstance(value, dict) and "ok" in value:
+                if not value["ok"]:
+                    detail = value.get("detail", "")
+                    raise StepFailure("{}{}".format(
+                        step.get("desc", "expect_js 불일치"),
+                        " - {}".format(detail) if detail else ""))
+                return None
+
             expected = step.get("equals", True)
             if value != expected:
                 raise StepFailure("{} - 기대:{} / 실제:{}".format(
@@ -605,32 +801,82 @@ COOKIES_TEMPLATE = """# 크롬 F12 > Application > Cookies 에서 표 전체를 
 """
 
 
+LOGIN_BAT_TEMPLATE = """@echo off
+setlocal
+set PYTHONIOENCODING=cp949:replace
+cd /d "%~dp0"
+
+echo.
+echo ===============================================
+echo   로그인 세션 저장
+echo ===============================================
+echo.
+echo   브라우저가 열리면 평소처럼 로그인하세요.
+echo   끝나면 브라우저 창을 그냥 닫으면 됩니다.
+echo.
+
+set /p TARGET=로그인 주소 입력:
+if "%TARGET%"=="" (
+    echo   주소가 없습니다.
+    pause
+    exit /b 1
+)
+
+py "{runner}" --login "%TARGET%" --ws "%~dp0"
+
+echo.
+pause
+"""
+
+
 def do_login(url, ws):
     """브라우저를 띄워 사용자가 직접 로그인하게 하고, 그 세션을 auth.json 으로 저장한다.
 
-    쿠키를 손으로 복사해오는 것보다 낫다 — localStorage 까지 함께 저장되고,
+    쿠키를 손으로 복사해오는 것보다 낫다 - localStorage 까지 함께 저장되고,
     만료되면 이 명령만 다시 돌리면 된다.
+
+    동선은 "로그인하고 창을 닫는다" 로 끝난다. 콘솔로 돌아가 Enter 를 누르게 하면
+    터미널을 안 쓰는 사람에게는 그 전환 자체가 장벽이고, Enter 전에는 아무것도 저장되지
+    않아 창을 먼저 닫으면 처음부터 다시 해야 했다. 여기서는 주기적으로 덮어쓰므로
+    중간에 창이 닫혀도 직전 상태가 남는다.
     """
     ws.mkdir(parents=True, exist_ok=True)
     auth = ws / "auth.json"
     print("[*] 브라우저를 엽니다: {}".format(url))
-    print("    창에서 로그인을 끝낸 뒤, 이 콘솔로 돌아와 Enter 를 누르세요.")
+    print("    로그인을 끝낸 뒤 그냥 브라우저 창을 닫으세요. 자동으로 저장됩니다.")
+    saved = 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         ctx = browser.new_context(viewport={"width": 1600, "height": 1000})
         page = ctx.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=120000)
         try:
-            input()
-        except EOFError:
-            print("[!] 콘솔 입력을 받을 수 없습니다. 터미널에서 직접 실행해 주세요.")
+            while not page.is_closed():
+                time.sleep(2)
+                try:
+                    ctx.storage_state(path=str(auth))
+                except Exception:
+                    break            # 컨텍스트가 닫혔다 = 사용자가 창을 닫음 (정상 종료)
+        except KeyboardInterrupt:
+            pass
+        try:
+            ctx.storage_state(path=str(auth))
+        except Exception:
+            pass
+        try:
             browser.close()
-            return 1
-        ctx.storage_state(path=str(auth))
-        n = len(json.loads(auth.read_text(encoding="utf-8")).get("cookies", []))
-        browser.close()
-    print("[*] 저장 완료: {} (쿠키 {}건)".format(auth, n))
+        except Exception:
+            pass
+
+    if not auth.exists():
+        print("[!] 세션이 저장되지 않았습니다. 로그인 후 창을 닫아야 합니다.")
+        return 1
+    saved = len(json.loads(auth.read_text(encoding="utf-8")).get("cookies", []))
+    print("[*] 저장 완료: {} (쿠키 {}건)".format(auth, saved))
     print('    스펙의 meta 에 "auth": "auth.json" 을 넣으면 이 세션으로 실행됩니다.')
+    if saved == 0:
+        print("[!] 쿠키가 0건입니다 - 로그인이 안 된 상태로 닫혔을 수 있습니다.")
+        return 1
     return 0
 
 
@@ -647,6 +893,10 @@ def init_workspace(target):
     # PYTHONIOENCODING 으로 맞추는 조합이 가장 안정적이다.
     bat.write_text(BAT_TEMPLATE.format(runner=SKILL_DIR / "qa_run.py"),
                    encoding="cp949", errors="replace")
+
+    lbat = ws / "login_qa.bat"
+    lbat.write_text(LOGIN_BAT_TEMPLATE.format(runner=SKILL_DIR / "qa_run.py"),
+                    encoding="cp949", errors="replace")
 
     ck = ws / "cookies.txt"
     if not ck.exists():
@@ -674,7 +924,8 @@ def init_workspace(target):
     print("    cases/    테스트 케이스 MD")
     print("    fixtures/ 업로드 테스트용 파일")
     print("    output/   리포트 + 스크린샷")
-    print("    run_qa.bat   더블클릭 실행")
+    print("    run_qa.bat    더블클릭 실행")
+    print("    login_qa.bat  로그인 세션 저장 (터미널 없이)")
     print("    cookies.txt  (선택) 개발자도구 쿠키 표 붙여넣기용")
     print("")
     print("[*] 로그인이 필요한 화면이면:")
