@@ -40,7 +40,7 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 sys.path.insert(0, str(Path(__file__).parent))
-from report import build_report
+from report import build_report, _dev_items
 
 # SKILL_DIR: 스킬에 번들된 스크립트·기본 픽스처가 있는 곳. 여기에는 아무것도 쓰지 않는다.
 SKILL_DIR = Path(__file__).parent
@@ -608,6 +608,11 @@ def run_case(runner, case, blocklist, dry_run):
         "title": case["title"],
         "requirement": case.get("requirement", ""),
         "source": case.get("source", ""),
+        # 실패했을 때 개발팀에 넘길 건지 기획팀이 먼저 볼 건지를 가르는 값
+        "kind": case.get("kind", "defect"),
+        # 웍스 등록용 로그에 쓰는 값. area 는 묶음 제목, fix 는 수정 지시 한 줄
+        "area": case.get("area", ""),
+        "fix": case.get("fix", ""),
         "writes": case.get("writes", False),
         "approved": case.get("approved", False),
         "status": "PASS",
@@ -646,19 +651,23 @@ def run_case(runner, case, blocklist, dry_run):
                 step.get("action"),
                 step.get("selector", step.get("url", step.get("name", "")))
             )
+            act = step.get("action")
             write = is_write_step(step)
             # 승인된 케이스여도 dry-run이면 쓰기 스텝은 건너뜀
             if write and dry_run:
                 result["steps"].append({"phase": phase, "n": i, "label": label,
+                                        "action": act,
                                         "status": "SKIP", "write": True, "msg": "dry-run"})
                 continue
             try:
                 runner.run(step, cid, i)
                 result["steps"].append({"phase": phase, "n": i, "label": label,
+                                        "action": act,
                                         "status": "OK", "write": write, "msg": ""})
             except Exception as e:
                 msg = str(e).split("\n")[0][:300]
                 result["steps"].append({"phase": phase, "n": i, "label": label,
+                                        "action": act,
                                         "status": "FAIL", "write": write, "msg": msg})
                 raise
 
@@ -1025,6 +1034,9 @@ def main():
     failed = sum(1 for r in results if r["status"] == "FAIL")
     print("\n[*] 결과: 통과 {} / 실패 {} / 전체 {}".format(passed, failed, len(results)))
     print("[*] 리포트: {}".format(report_path))
+    n_dev = len(_dev_items(results))
+    if n_dev:
+        print("[*] 개발 전달용 {}건: {}".format(n_dev, out_dir / "개발전달.md"))
     return 1 if failed else 0
 
 
