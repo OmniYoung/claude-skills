@@ -7,6 +7,8 @@ QA 자동화 러너 - spec.json을 읽어 실제 사이트에서 테스트를 �
   py <skill>/qa_auto/qa_run.py ... --dry-run       쓰기 스텝 전부 건너뜀 (셀렉터 검증용)
   py <skill>/qa_auto/qa_run.py ... --headed        브라우저 띄워서 눈으로 확인
   py <skill>/qa_auto/qa_run.py ... --case TC-003   특정 케이스만
+  py <skill>/qa_auto/qa_run.py --login URL [URL2 ...] --ws qa_auto
+                                                   로그인 창. 로그인하면 저장 후 저절로 닫힘
 
 산출물 위치:
   이 스크립트는 스킬 폴더에 아무것도 쓰지 않는다. 스펙 파일 위치로 작업 폴더를 정한다.
@@ -806,7 +808,9 @@ COOKIES_TEMPLATE = """# 크롬 F12 > Application > Cookies 에서 표 전체를 
 # 컬럼 순서: Name / Value / Domain / Path / ... (탭 구분)
 #
 # 스펙에는  "cookies": "cookies.txt"  를 넣습니다.
-# 가능하면 이 방식보다  --login  을 쓰세요 (만료 시 다시 로그인만 하면 됩니다).
+# 로그인 창을 띄울 수 없는 환경에서만 쓰세요. 보통은  --login  으로 충분합니다.
+# 세션을 브라우저 정보(UA)에 묶는 사이트는 복사한 쿠키가 안 먹을 수 있습니다.
+# 그때는 스펙 meta 에  "user_agent": "<쿠키를 복사한 브라우저의 navigator.userAgent>"  를 넣습니다.
 """
 
 
@@ -820,8 +824,9 @@ echo ===============================================
 echo   로그인 세션 저장
 echo ===============================================
 echo.
-echo   브라우저가 열리면 평소처럼 로그인하세요.
-echo   끝나면 브라우저 창을 그냥 닫으면 됩니다.
+echo   브라우저가 열리면 로그인만 하세요.
+echo   로그인이 확인되면 저장하고 창이 저절로 닫힙니다.
+echo   사이트가 여러 개면 주소를 띄어쓰기로 이어서 입력하세요.
 echo.
 
 set /p TARGET=로그인 주소 입력:
@@ -831,61 +836,160 @@ if "%TARGET%"=="" (
     exit /b 1
 )
 
-py "{runner}" --login "%TARGET%" --ws "%~dp0"
+py "{runner}" --login %TARGET% --ws "%~dp0."
 
 echo.
 pause
 """
 
 
-def do_login(url, ws):
-    """브라우저를 띄워 사용자가 직접 로그인하게 하고, 그 세션을 auth.json 으로 저장한다.
+LOGIN_TIMEOUT = 15 * 60
 
-    쿠키를 손으로 복사해오는 것보다 낫다 - localStorage 까지 함께 저장되고,
-    만료되면 이 명령만 다시 돌리면 된다.
+# 화면이 로그인된 상태인지 본다. 페이지 안에서 읽기만 하므로 탭을 새로 띄우지 않는다.
+# 로그인 안 된 신호: 보이는 비밀번호 칸, 또는 글자가 딱 "로그인"인 링크·버튼.
+# 리다이렉트 중간의 빈 화면을 로그인으로 오판하지 않도록 본문 길이도 본다.
+LOGIN_STATE_JS = """(done) => {
+  if (document.readyState !== 'complete' || !document.body) return {ready: false};
+  const vis = (el) => {
+    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const word = /^(로그인|login|log in|sign in|signin)$/i;
+  const text = document.body.innerText || '';
+  return {
+    ready: true,
+    pw: [...document.querySelectorAll('input[type=password]')].some(vis),
+    loginLink: [...document.querySelectorAll('a,button,input[type=submit],input[type=button]')]
+      .some((el) => vis(el) && word.test((el.innerText || el.value || '').trim())),
+    len: text.length,
+    done: done ? text.includes(done) : null,
+  };
+}"""
 
-    동선은 "로그인하고 창을 닫는다" 로 끝난다. 콘솔로 돌아가 Enter 를 누르게 하면
-    터미널을 안 쓰는 사람에게는 그 전환 자체가 장벽이고, Enter 전에는 아무것도 저장되지
-    않아 창을 먼저 닫으면 처음부터 다시 해야 했다. 여기서는 주기적으로 덮어쓰므로
-    중간에 창이 닫혀도 직전 상태가 남는다.
+
+def _site(host):
+    """같은 사이트 판정용. admin.bluepharmkorea.co.kr 과 bluepharmkorea.co.kr 을 같은 곳으로 본다."""
+    labels = (host or "").lower().split(".")
+    n = 3 if len(labels) >= 3 and labels[-2] in ("co", "or", "go", "ne", "ac", "re", "pe") else 2
+    return ".".join(labels[-n:])
+
+
+def _host(url):
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _logged_in(page, done_text):
+    try:
+        st = page.evaluate(LOGIN_STATE_JS, done_text or "")
+    except Exception:
+        return False
+    if not st.get("ready"):
+        return False
+    if done_text:
+        return bool(st.get("done"))
+    return not st["pw"] and not st["loginLink"] and st["len"] >= 200
+
+
+def _snapshot(ctx):
+    """storage_state 형식으로 세션을 모은다.
+
+    ctx.storage_state() 는 열려 있지 않은 출처의 localStorage 를 읽으려고 숨은 탭을 띄웠다
+    닫는다. 헤드풀 창에서 이걸 주기적으로 부르면 화면이 계속 깜빡이므로 쓰지 않는다.
+    쿠키는 ctx.cookies(), localStorage 는 지금 열린 탭에서만 읽는다.
+    """
+    origins = {}
+    for pg in ctx.pages:
+        if pg.is_closed():
+            continue
+        try:
+            o = pg.evaluate("""() => ({origin: location.origin,
+                localStorage: Object.keys(localStorage).map(k => ({name: k, value: localStorage.getItem(k)}))})""")
+        except Exception:
+            continue
+        if o["origin"].startswith("http"):
+            origins[o["origin"]] = o
+    return {"cookies": ctx.cookies(), "origins": list(origins.values())}
+
+
+def _ua_path(auth):
+    return auth.with_name(auth.stem + ".meta.json")
+
+
+def do_login(urls, ws, done_text=None):
+    """로그인 창을 띄우고, 로그인이 끝나면 세션을 저장한 뒤 창을 스스로 닫는다.
+
+    사용자 동선은 "로그인만 한다" 로 끝난다. 창을 직접 닫을 필요도, 콘솔로 돌아갈 필요도 없다.
+    주소를 여러 개 주면 하나가 로그인되는 대로 같은 탭을 다음 주소로 보낸다
+    (예: 프론트 + 어드민). 기존 auth.json 이 있으면 불러와서 시작하므로, 이미 살아 있는
+    사이트는 바로 통과하고 빠진 사이트만 로그인하면 된다.
+
+    로그인 당시 브라우저의 UA 를 auth.meta.json 에 같이 남긴다. 세션을 UA 에 묶어두는
+    사이트가 있어서(블루닥), 헤드리스 실행 때 UA 가 달라지면 쿠키가 살아 있어도 비로그인으로
+    보인다. 러너는 이 파일이 있으면 같은 UA 로 실행한다.
     """
     ws.mkdir(parents=True, exist_ok=True)
     auth = ws / "auth.json"
-    print("[*] 브라우저를 엽니다: {}".format(url))
-    print("    로그인을 끝낸 뒤 그냥 브라우저 창을 닫으세요. 자동으로 저장됩니다.")
-    saved = 0
+    print("[*] 로그인 창을 엽니다: {}".format(" -> ".join(urls)))
+    print("    로그인만 하세요. 로그인이 확인되면 저장하고 창이 저절로 닫힙니다.")
+
+    done_sites, snap, ua = [], None, None
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        ctx = browser.new_context(viewport={"width": 1600, "height": 1000})
+        ctx_args = {"viewport": {"width": 1600, "height": 1000}}
+        if auth.exists():
+            ctx_args["storage_state"] = str(auth)
+        ctx = browser.new_context(**ctx_args)
         page = ctx.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=120000)
+        page.goto(urls[0], wait_until="domcontentloaded", timeout=120000)
+        ua = page.evaluate("navigator.userAgent")
+
+        idx, streak, start = 0, 0, time.time()
         try:
-            while not page.is_closed():
-                time.sleep(2)
+            while time.time() - start < LOGIN_TIMEOUT:
+                pages = [pg for pg in ctx.pages if not pg.is_closed()]
+                if not pages:
+                    break                                   # 사용자가 창을 닫음
                 try:
-                    ctx.storage_state(path=str(auth))
+                    snap = _snapshot(ctx)
                 except Exception:
-                    break            # 컨텍스트가 닫혔다 = 사용자가 창을 닫음 (정상 종료)
+                    break
+                site = _site(_host(urls[idx]))
+                hit = next((pg for pg in pages
+                            if _site(_host(pg.url)) == site and _logged_in(pg, done_text)), None)
+                streak = streak + 1 if hit else 0
+                if streak >= 2:                             # 두 번 연속이어야 확정 (중간 화면 오판 방지)
+                    print("[*] 로그인 확인: {}".format(_host(urls[idx])))
+                    done_sites.append(urls[idx])
+                    idx, streak = idx + 1, 0
+                    if idx >= len(urls):
+                        snap = _snapshot(ctx)
+                        break
+                    hit.goto(urls[idx], wait_until="domcontentloaded", timeout=120000)
+                    print("    다음 로그인: {}".format(urls[idx]))
+                time.sleep(1.5)
         except KeyboardInterrupt:
-            pass
-        try:
-            ctx.storage_state(path=str(auth))
-        except Exception:
             pass
         try:
             browser.close()
         except Exception:
             pass
 
-    if not auth.exists():
-        print("[!] 세션이 저장되지 않았습니다. 로그인 후 창을 닫아야 합니다.")
+    if not snap or not snap["cookies"]:
+        print("[!] 세션이 저장되지 않았습니다. 다시 실행해 로그인하세요.")
         return 1
-    saved = len(json.loads(auth.read_text(encoding="utf-8")).get("cookies", []))
-    print("[*] 저장 완료: {} (쿠키 {}건)".format(auth, saved))
+    auth.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+    _ua_path(auth).write_text(json.dumps({"user_agent": ua}, ensure_ascii=False), encoding="utf-8")
+    print("[*] 저장 완료: {} (쿠키 {}건)".format(auth, len(snap["cookies"])))
+    missing = [u for u in urls if u not in done_sites]
+    if missing:
+        print("[!] 로그인 확인 전에 창이 닫혔거나 시간이 지났습니다: {}".format(", ".join(missing)))
+        print("    이 주소는 로그인이 안 된 상태로 저장됐을 수 있습니다.")
+        return 1
     print('    스펙의 meta 에 "auth": "auth.json" 을 넣으면 이 세션으로 실행됩니다.')
-    if saved == 0:
-        print("[!] 쿠키가 0건입니다 - 로그인이 안 된 상태로 닫혔을 수 있습니다.")
-        return 1
     return 0
 
 
@@ -917,6 +1021,7 @@ def init_workspace(target):
         gi.write_text(
             "# 실제 로그인 세션 - 절대 커밋 금지\n"
             "auth.json\n"
+            "auth.meta.json\n"
             "cookies.txt\n"
             "cookies.json\n"
             "\n"
@@ -949,8 +1054,10 @@ def main():
     ap.add_argument("spec", nargs="?", help="spec.json 경로")
     ap.add_argument("--init", metavar="DIR",
                     help="해당 폴더에 작업 폴더(qa_auto/)와 실행 배치파일을 만든다")
-    ap.add_argument("--login", metavar="URL",
-                    help="브라우저를 띄워 직접 로그인하고 세션을 auth.json 으로 저장한다")
+    ap.add_argument("--login", metavar="URL", nargs="+",
+                    help="로그인 창을 띄워 세션을 auth.json 으로 저장한다. 여러 주소면 차례로 로그인")
+    ap.add_argument("--done-text", metavar="TEXT",
+                    help="--login 에서 로그인 완료로 볼 문구 (예: 로그아웃). 없으면 화면으로 자동 판정")
     ap.add_argument("--ws", metavar="DIR", default="qa_auto",
                     help="--login 이 저장할 작업 폴더 (기본: ./qa_auto)")
     ap.add_argument("--dry-run", action="store_true", help="쓰기 스텝 전부 건너뜀")
@@ -961,7 +1068,7 @@ def main():
     if args.init:
         return init_workspace(Path(args.init).resolve())
     if args.login:
-        return do_login(args.login, Path(args.ws).resolve())
+        return do_login(args.login, Path(args.ws).resolve(), args.done_text)
     if not args.spec:
         ap.error("spec 경로가 필요하다 (또는 --init DIR / --login URL)")
 
@@ -1007,6 +1114,15 @@ def main():
                 sys.exit(1)
             ctx_args["storage_state"] = str(auth_path)
             print("[*] 세션 사용: {}".format(auth_path.name))
+            # 세션을 UA 에 묶는 사이트가 있어 로그인 당시 UA 로 맞춘다 (do_login 참고)
+            ua_file = _ua_path(auth_path)
+            if not meta.get("user_agent") and ua_file.exists():
+                saved_ua = json.loads(ua_file.read_text(encoding="utf-8")).get("user_agent")
+                if saved_ua:
+                    ctx_args["user_agent"] = saved_ua
+
+        if meta.get("user_agent"):
+            ctx_args["user_agent"] = meta["user_agent"]
 
         ctx = browser.new_context(**ctx_args)
         if meta.get("cookies"):

@@ -21,8 +21,9 @@
 |---|---|---|
 | `project` | O | 프로젝트명 (출력 폴더명에 사용) |
 | `base_url` | O | 대상 사이트 origin |
-| `auth` | - | `--login` 으로 저장한 세션 파일 경로 (보통 `auth.json`). **로그인이 필요하면 이걸 권장** |
-| `cookies` | - | 쿠키 파일 경로. `--login` 을 못 쓰는 상황에서 수동으로 넣을 때 |
+| `auth` | - | `--login` 으로 저장한 세션 파일 경로 (보통 `auth.json`). 옆의 `auth.meta.json` 에 든 로그인 당시 UA 도 자동 적용 |
+| `cookies` | - | 쿠키 파일 경로. 로그인 창을 띄울 수 없는 상황에서 수동으로 넣을 때 |
+| `user_agent` | - | UA 강제 지정. 붙여넣은 쿠키가 UA 에 묶인 사이트에서 안 먹을 때 쿠키를 복사한 브라우저의 UA 를 넣는다 |
 | `login_check` | - | 세션 만료 감지 조건. `{"url_contains": "...", "body_contains": "..."}` |
 | `qa_prefix` | O | 테스트 생성 데이터에 강제로 붙는 식별자. 예: `[QA]20260911` |
 | `sources` | O | 테스트 케이스 근거가 된 기획 자료 경로 목록 |
@@ -30,19 +31,22 @@
 
 ### 로그인
 
-**권장 — 브라우저에서 직접 로그인**
+**기본: 로그인 창**
 
 ```
-py <skill>/qa_auto/qa_run.py --login https://admin.example.com/ --ws qa_auto
+py <skill>/qa_auto/qa_run.py --login https://www.example.com/ https://admin.example.com/ --ws qa_auto
 ```
 
-브라우저가 열리면 평소처럼 로그인하고 콘솔로 돌아와 Enter. 세션이 `qa_auto/auth.json` 에 저장된다.
-쿠키뿐 아니라 localStorage 까지 담기므로 쿠키만 복사하는 것보다 확실하고, 만료되면 이 명령만 다시
-돌리면 된다. 스펙에는 `"auth": "auth.json"` 한 줄만 넣는다.
+창이 열리면 로그인만 한다. 로그인이 감지되면 다음 주소로 넘어가고, 마지막 주소까지 끝나면 저장 후
+창이 저절로 닫힌다. 세션은 `qa_auto/auth.json`, 로그인 당시 UA 는 `qa_auto/auth.meta.json` 에
+저장된다. 쿠키뿐 아니라 localStorage 까지 담기고, 만료되면 이 명령만 다시 돌리면 된다 (살아 있는
+사이트는 바로 통과). 스펙에는 `"auth": "auth.json"` 한 줄만 넣는다.
 
-**대안 — 개발자도구 표 붙여넣기**
+화면 자동 판정이 안 맞는 사이트면 `--done-text 로그아웃` 처럼 로그인했을 때만 보이는 문구를 준다.
 
-`--login` 을 쓸 수 없는 상황(원격·자동화 환경)이면 크롬 `F12 > Application > Cookies` 에서
+**예외: 개발자도구 표 붙여넣기**
+
+로그인 창을 띄울 수 없는 상황(원격 세션 등)이면 크롬 `F12 > Application > Cookies` 에서
 표 전체를 선택해 복사한 뒤, `qa_auto/cookies.txt` 에 **그대로 붙여넣는다.** 탭 구분 텍스트를
 그대로 읽으므로 JSON 으로 고칠 필요가 없다.
 
