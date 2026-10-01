@@ -24,7 +24,9 @@
 | `auth` | - | `--login` 으로 저장한 세션 파일 경로 (보통 `auth.json`). 옆의 `auth.meta.json` 에 든 로그인 당시 UA 도 자동 적용 |
 | `cookies` | - | 쿠키 파일 경로. 로그인 창을 띄울 수 없는 상황에서 수동으로 넣을 때 |
 | `user_agent` | - | UA 강제 지정. 붙여넣은 쿠키가 UA 에 묶인 사이트에서 안 먹을 때 쿠키를 복사한 브라우저의 UA 를 넣는다 |
-| `login_check` | - | 세션 만료 감지 조건. `{"url_contains": "...", "body_contains": "..."}` |
+| `login_check` | - | 세션 만료 감지 조건. `{"url_contains": "...", "body_contains": "..."}` 또는 그 목록. 아래 참고 |
+| `sessions` | - | 로그인 상태가 다른 세션을 이름 붙여 더 둔다. 아래 "세션 여러 개" 참고 |
+| `session_label` | - | 기본 세션(위 `auth` 등)의 리포트 표시 이름. 예: `회원` |
 | `qa_prefix` | O | 테스트 생성 데이터에 강제로 붙는 식별자. 예: `[QA]20260911` |
 | `sources` | O | 테스트 케이스 근거가 된 기획 자료 경로 목록 |
 | `viewport` | - | `{"width":1600,"height":900}` (기본값) |
@@ -67,6 +69,46 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 "login_check": { "body_contains": "인증이 필요한 관리자 페이지" }
 ```
 
+한 세션으로 프론트와 어드민을 오가면 조건을 목록으로 주고, `when_url` 로 어느 화면에서 볼 조건인지
+나눈다. `when_url` 이 현재 URL 에 들어 있을 때만 그 조건을 본다. 한쪽의 비로그인 문구가 다른 쪽
+화면에도 있으면(예: 프론트 비로그인 문구 "회원가입" 이 어드민 메뉴 "회원가입 이벤트페이지" 에도
+있음) 나누지 않으면 오탐으로 실행이 멈춘다.
+
+```json
+"login_check": [
+  { "when_url": "www.example.com", "body_contains": "회원가입" },
+  { "when_url": "admin.example.com", "body_contains": "인증이 필요한 관리자 페이지" }
+]
+```
+
+### 세션 여러 개 (비회원 · 회원 · 어드민을 한 스펙에)
+
+로그인 상태가 다른 화면을 같이 검수할 때 스펙을 나누지 않는다. 리포트도 웍스 로그도 스펙마다
+따로 나와서, 개발팀에 넘길 때 같은 결함이 두 번 실리거나 파일을 여러 개 봐야 한다.
+
+`meta.sessions` 에 이름 붙인 세션을 두고, 케이스에 `"session": "<이름>"` 을 준다. `session` 을
+안 준 케이스는 지금처럼 meta 의 `auth`·`cookies`·`user_agent`·`login_check` (기본 세션) 로 돈다.
+
+```json
+"meta": {
+  "auth": "auth.json",
+  "session_label": "회원",
+  "login_check": { "when_url": "www.example.com", "body_contains": "회원가입" },
+  "sessions": {
+    "guest": { "label": "비회원" }
+  }
+}
+```
+
+- 세션 하나에 쓸 수 있는 키: `auth`, `cookies`, `user_agent`, `login_check`, `viewport`, `label`. 다 비우면(`{}`) 비로그인.
+  `viewport` 를 주면 그 세션만 화면 크기가 달라진다 (예: 좁은 화면에서 숨는 요소 검수용 `"narrow": {"auth": "auth.json", "viewport": {"width":1600,"height":900}}`).
+- 이름 붙인 세션은 meta 의 기본값을 물려받지 않는다. `login_check` 도 그 세션 것만 본다.
+- 러너는 세션마다 브라우저 컨텍스트를 따로 연다 (쿠키가 섞이지 않는다). 같은 세션의 케이스끼리는
+  페이지를 이어 쓰므로, 케이스는 지금처럼 `goto` 로 시작한다.
+- 리포트 케이스 머리에 `label` 이 붙고, `개발전달.md` 에 "로그인 상태" 줄이 들어간다.
+- 프론트 회원 세션과 어드민 세션은 `--login <프론트> <어드민>` 으로 받은 `auth.json` 하나에 같이
+  담기므로, 보통은 기본 세션 하나(회원 + 어드민)와 `guest` 하나면 된다.
+
 ### blocklist
 
 셀렉터 또는 텍스트 패턴 목록. **승인 여부와 무관하게 무조건 차단**되며, 매칭되면 해당 케이스는 즉시 ABORT.
@@ -88,6 +130,7 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 | `writes` | O | 이 케이스가 서버에 쓰기를 하는가 (true/false) |
 | `approved` | O | **사람이 쓰기를 허용했는가.** `writes:true`인데 `approved:false`면 실행 안 하고 SKIP |
 | `chains` | - | 독립 동작을 이어 붙인 케이스인가. 실패 시 단독 재현으로 원인을 가린다 (아래 참고) |
+| `session` | - | 이 케이스를 돌릴 세션 이름 (`meta.sessions` 의 키). 없으면 기본 세션 |
 | `steps` | O | 실행 스텝 배열 |
 | `cleanup` | - | 생성한 데이터 정리 스텝. `writes:true`면 필수 |
 
@@ -153,6 +196,22 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 **한 동작을 쪼갠 케이스에는 쓰지 않는다.** 메모 편집(더블클릭 → 입력 → Enter → 확인)처럼
 앞 스텝이 *선행 상태*가 아니라 *그 동작의 일부*라면, 단독으로 떼어낼 대상이 없다. 이미 최소
 단위이므로 플래그를 달지 않는다 (달아도 선행 동작을 못 찾으면 아무것도 하지 않는다).
+
+---
+
+## 날짜 표기 (실행일 기준)
+
+스텝의 `selector`·`value`·`text`·`url`·`js`·`contains`·`not_contains` 에 `{TODAY}` 를 쓰면 실행일
+(YYYY-MM-DD)로 바뀐다. `{TODAY+30}`, `{TODAY-1}` 처럼 날짜 수를 더하고 뺄 수 있다.
+
+```json
+{"action": "fill", "selector": ".date_input", "value": "{TODAY}"},
+{"action": "click", "selector": ".cal_day[data-date='{TODAY+1}']"}
+```
+
+날짜 입력 · 달력 · D-day 화면은 고정 날짜를 박으면 시간이 지나 과거 날짜가 되거나, 달력이 다른 달로
+열렸을 때 "오늘" 칸을 집을 수 없다. 다만 저장된 값과 비교해야 하는 케이스(예: "기존 값과 같으면
+저장 비활성")는 고정 날짜가 맞다. 앞 실행에서 저장한 값이 실행일에 따라 달라지면 비교가 깨진다.
 
 ---
 

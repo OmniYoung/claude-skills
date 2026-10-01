@@ -200,6 +200,8 @@ def build_dev_md(spec, results, out_dir):
         if area:
             L.append("| 영역 | {} |".format(area))
         L.append("| 케이스 | `{}` |".format(r["id"]))
+        if r.get("session"):
+            L.append("| 로그인 상태 | {} |".format(r["session"]))
         L.append("| 기대 | {} |".format(r["requirement"].replace("\n", " ") or "-"))
         L.append("| 실제 | {} |".format(_actual(r).replace("\n", " ")))
         L.append("| 근거 | {} |".format(r["source"] or "-"))
@@ -345,6 +347,9 @@ def _case_block(r, spec_case, spec_path):
     ktag = ""
     if kind != DEFAULT_KIND:
         ktag = '<span class="ktag">{}</span>'.format(_esc(KIND_META[kind][0]))
+    # 스펙 하나에 세션이 여럿이면(비회원 · 회원 · 어드민) 어느 로그인 상태로 본 건지 표시한다
+    if r.get("session"):
+        ktag = '<span class="ktag">{}</span>'.format(_esc(r["session"])) + ktag
 
     head = ('<span class="badge" style="color:{c};background:{bg}">{l}</span>'
             '<span class="cid">{id}</span><span class="ctitle">{t}</span>'

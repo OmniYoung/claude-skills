@@ -27,7 +27,7 @@ import pathlib
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -88,6 +88,27 @@ READ_KEYS = {"escape", "tab", "arrowup", "arrowdown", "arrowleft", "arrowright",
              "pageup", "pagedown", "home", "end", "shift+tab"}
 
 DEFAULT_VIEWPORT = {"width": 1600, "height": 900}
+
+# 세션 하나를 이루는 meta 키. meta 에 직접 쓰면 기본 세션, meta.sessions.<이름> 에 쓰면 이름 붙인 세션.
+SESSION_KEYS = ("auth", "cookies", "user_agent", "login_check", "viewport")
+
+# 실행일 기준 날짜. "{TODAY}", "{TODAY+30}", "{TODAY-1}" -> YYYY-MM-DD.
+# 날짜 입력 · 달력 화면은 고정 날짜를 쓰면 시간이 지나 과거가 되거나 "오늘" 칸을 못 집는다.
+DATE_TOKEN = re.compile(r"\{TODAY(?:([+-])(\d+))?\}")
+TOKEN_FIELDS = ("selector", "value", "text", "url", "js", "contains", "not_contains")
+
+
+def expand_tokens(step):
+    def rep(m):
+        d = date.today()
+        if m.group(1):
+            d += timedelta(days=int(m.group(2)) * (1 if m.group(1) == "+" else -1))
+        return d.isoformat()
+    out = dict(step)
+    for k in TOKEN_FIELDS:
+        if isinstance(out.get(k), str) and "{TODAY" in out[k]:
+            out[k] = DATE_TOKEN.sub(rep, out[k])
+    return out
 
 
 def is_write_step(step):
@@ -244,11 +265,23 @@ class Runner:
         self.base_url = spec["meta"]["base_url"].replace(
             "{QA_ROOT}", SKILL_DIR.as_uri()).rstrip("/")
         self.qa_prefix = spec["meta"].get("qa_prefix", "")
+        self.login_check = spec["meta"].get("login_check")
         self.dialogs = []          # 직전 액션이 띄운 알럿 버퍼
         self.warnings = []
         self.shots = []
         self.files = {}   # download 로 받은 파일
         page.on("dialog", self._on_dialog)
+
+    def use_page(self, page, login_check):
+        """케이스가 다른 세션이면 그 세션의 페이지로 갈아탄다 (meta.sessions 참고).
+
+        세션마다 브라우저 컨텍스트가 따로라 쿠키가 섞이지 않는다. 같은 세션의 케이스끼리는
+        페이지를 이어 쓰므로 지금까지처럼 앞 케이스의 상태가 남는다.
+        """
+        if page is not self.page:
+            self.page = page
+            self.dialogs = []
+        self.login_check = login_check
 
     def _on_dialog(self, dialog):
         self.dialogs.append(dialog.message)
@@ -259,21 +292,28 @@ class Runner:
 
         세션이 만료되면 모든 케이스가 엉뚱한 이유로 줄줄이 실패해서 원인 파악이 오래 걸린다.
         첫 페이지에서 바로 잡아 중단시키는 편이 낫다.
+
+        login_check 는 조건 하나 또는 목록이다. 조건에 when_url 이 있으면 현재 URL 에 그 문자열이
+        들어 있을 때만 본다. 한 세션으로 프론트와 어드민을 오가면 한쪽의 "비로그인 문구"가
+        다른 쪽 화면(예: 어드민 메뉴의 '회원가입 이벤트페이지')에도 있어 오탐이 나기 때문이다.
         """
-        chk = self.spec["meta"].get("login_check")
+        chk = self.login_check
         if not chk:
             return
-        url_hit = chk.get("url_contains") and chk["url_contains"] in self.page.url
-        body_hit = False
-        if chk.get("body_contains"):
-            try:
-                body_hit = chk["body_contains"] in (self.page.inner_text("body") or "")
-            except Exception:
-                body_hit = False
-        if url_hit or body_hit:
-            raise SessionExpired(
-                "로그인 세션이 만료된 것으로 보인다 (현재 URL: {}). "
-                "인증 파일을 갱신한 뒤 다시 실행할 것.".format(self.page.url))
+        for rule in (chk if isinstance(chk, list) else [chk]):
+            if rule.get("when_url") and rule["when_url"] not in self.page.url:
+                continue
+            url_hit = rule.get("url_contains") and rule["url_contains"] in self.page.url
+            body_hit = False
+            if rule.get("body_contains"):
+                try:
+                    body_hit = rule["body_contains"] in (self.page.inner_text("body") or "")
+                except Exception:
+                    body_hit = False
+            if url_hit or body_hit:
+                raise SessionExpired(
+                    "로그인 세션이 만료된 것으로 보인다 (현재 URL: {}). "
+                    "인증 파일을 갱신한 뒤 다시 실행할 것.".format(self.page.url))
 
     def _warn_prefix(self, value, case_id, idx):
         """테스트로 만든 데이터인지 눈으로 구분되게 QA 프리픽스를 권한다.
@@ -363,6 +403,7 @@ class Runner:
                 "width": min(x1 - x0, vw["width"]), "height": y1 - y0}
 
     def run(self, step, case_id, idx):
+        step = expand_tokens(step)
         action = step.get("action")
         if action not in ALL_ACTIONS:
             raise StepFailure("정의되지 않은 action: {}".format(action))
@@ -1047,6 +1088,38 @@ def init_workspace(target):
     return 0
 
 
+def _context_args(conf, name, meta, spec_path, workspace):
+    """세션 설정 하나를 브라우저 컨텍스트 인자로 바꾼다. 인증 파일이 없으면 실행 전에 멈춘다."""
+    args = {"viewport": conf.get("viewport") or meta.get("viewport", DEFAULT_VIEWPORT)}
+    label = " [{}]".format(conf.get("label") or name) if name else ""
+
+    # auth: --login 으로 저장한 세션(쿠키 + localStorage). 쿠키 복붙보다 이쪽을 권한다.
+    if conf.get("auth"):
+        auth_path = None
+        for base in (spec_path.parent, workspace):
+            cand = (base / conf["auth"]).resolve()
+            if cand.exists():
+                auth_path = cand
+                break
+        if auth_path is None:
+            print("[!] 인증 파일 없음{}: {} — `--login <URL>` 로 먼저 로그인하세요.".format(label, conf["auth"]))
+            sys.exit(1)
+        args["storage_state"] = str(auth_path)
+        print("[*] 세션 사용{}: {}".format(label, auth_path.name))
+        # 세션을 UA 에 묶는 사이트가 있어 로그인 당시 UA 로 맞춘다 (do_login 참고)
+        ua_file = _ua_path(auth_path)
+        if not conf.get("user_agent") and ua_file.exists():
+            saved_ua = json.loads(ua_file.read_text(encoding="utf-8")).get("user_agent")
+            if saved_ua:
+                args["user_agent"] = saved_ua
+    elif name and not conf.get("cookies"):
+        print("[*] 세션 사용{}: 비로그인".format(label))
+
+    if conf.get("user_agent"):
+        args["user_agent"] = conf["user_agent"]
+    return args
+
+
 # -- 메인 ------------------------------------------------------
 
 def main():
@@ -1096,49 +1169,56 @@ def main():
     print("[*] 케이스: {}건{}".format(
         len(cases), "  (DRY-RUN - 쓰기 없음)" if args.dry_run else ""))
 
+    # 세션: meta 의 auth/cookies/user_agent/login_check 가 기본 세션이고, meta.sessions 에
+    # 이름 붙인 세션을 더 둘 수 있다 ({} 면 비로그인). 케이스의 "session" 으로 고른다.
+    # 비회원·회원·어드민처럼 로그인 상태가 다른 화면을 스펙 하나, 리포트 하나로 묶기 위함이다.
+    sessions = {"": {k: meta[k] for k in SESSION_KEYS if k in meta}}
+    sessions[""]["label"] = meta.get("session_label", "")
+    sessions.update(meta.get("sessions") or {})
+    unknown = sorted({c.get("session") for c in cases if c.get("session", "") not in sessions})
+    if unknown:
+        print("[!] meta.sessions 에 없는 session: {}".format(", ".join(unknown)))
+        sys.exit(1)
+    used = []
+    for c in cases:
+        name = c.get("session", "")
+        if name not in used:
+            used.append(name)
+    ctx_args = {name: _context_args(sessions[name], name, meta, spec_path, workspace) for name in used}
+
     results = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not args.headed)
-        ctx_args = {"viewport": meta.get("viewport", DEFAULT_VIEWPORT)}
+        pages, runner = {}, None
 
-        # auth: --login 으로 저장한 세션(쿠키 + localStorage). 쿠키 복붙보다 이쪽을 권한다.
-        if meta.get("auth"):
-            auth_path = None
-            for base in (spec_path.parent, workspace):
-                cand = (base / meta["auth"]).resolve()
-                if cand.exists():
-                    auth_path = cand
-                    break
-            if auth_path is None:
-                print("[!] 인증 파일 없음: {} — `--login <URL>` 로 먼저 로그인하세요.".format(meta["auth"]))
-                sys.exit(1)
-            ctx_args["storage_state"] = str(auth_path)
-            print("[*] 세션 사용: {}".format(auth_path.name))
-            # 세션을 UA 에 묶는 사이트가 있어 로그인 당시 UA 로 맞춘다 (do_login 참고)
-            ua_file = _ua_path(auth_path)
-            if not meta.get("user_agent") and ua_file.exists():
-                saved_ua = json.loads(ua_file.read_text(encoding="utf-8")).get("user_agent")
-                if saved_ua:
-                    ctx_args["user_agent"] = saved_ua
+        def page_for(name):
+            """세션별 컨텍스트는 그 세션을 처음 쓰는 케이스에서 만든다."""
+            if name not in pages:
+                ctx = browser.new_context(**ctx_args[name])
+                if sessions[name].get("cookies"):
+                    ctx.add_cookies(load_cookies(spec_path, sessions[name]["cookies"], workspace))
+                pg = ctx.new_page()
+                if runner is not None:
+                    pg.on("dialog", runner._on_dialog)
+                pages[name] = pg
+            return pages[name]
 
-        if meta.get("user_agent"):
-            ctx_args["user_agent"] = meta["user_agent"]
-
-        ctx = browser.new_context(**ctx_args)
-        if meta.get("cookies"):
-            ctx.add_cookies(load_cookies(spec_path, meta["cookies"], workspace))
-        page = ctx.new_page()
-        runner = Runner(page, spec, spec_path, shot_dir, workspace)
+        runner = Runner(page_for(used[0] if used else ""), spec, spec_path, shot_dir, workspace)
 
         try:
             for case in cases:
+                name = case.get("session", "")
+                runner.use_page(page_for(name), sessions[name].get("login_check"))
                 r = run_case(runner, case, spec.get("blocklist", []), args.dry_run)
+                r["session"] = sessions[name].get("label") or name
                 results.append(r)
                 icon = {"PASS": "O", "FAIL": "X", "SKIPPED": "-", "BLOCKED": "!"}[r["status"]]
-                print("  [{}] {} {}  {}".format(icon, r["id"], r["title"][:50], r["reason"][:60]))
+                tag = " ({})".format(r["session"]) if r["session"] else ""
+                print("  [{}] {}{} {}  {}".format(icon, r["id"], tag, r["title"][:50], r["reason"][:60]))
         except SessionExpired as e:
             browser.close()
-            print("\n[!] 실행 중단 - {}".format(e))
+            print("\n[!] 실행 중단 - {}{}".format(
+                "[{}] ".format(sessions[name].get("label") or name) if name else "", e))
             print("    py qa_run.py --login <URL> --ws <작업폴더>  로 세션을 갱신하세요.")
             return 2
 
