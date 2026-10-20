@@ -446,6 +446,107 @@ def build_states_slide(prs, sb_id, part_label, rows, state_dir, img_max_h=4.4, t
 
 
 # =========================================================
+# 동작 흐름 슬라이드 (왼쪽 플로우차트 + 오른쪽 번호 설명)
+# =========================================================
+FLOW_RED = RGBColor(0xD9, 0x2D, 0x20)
+FLOW_LIGHT = RGBColor(0xEE, 0xF3, 0xFE)
+
+
+def _flow_node(slide, kind, cx, cy, w, h, text, border=BLUE, fill=WHITE, bold=False):
+    shape_type = {"decision": MSO_SHAPE.DIAMOND, "process": MSO_SHAPE.RECTANGLE}.get(kind, MSO_SHAPE.ROUNDED_RECTANGLE)
+    sh = slide.shapes.add_shape(shape_type, Cm(cx - w / 2), Cm(cy - h / 2), Cm(w), Cm(h))
+    sh.fill.solid()
+    sh.fill.fore_color.rgb = fill
+    sh.line.color.rgb = border
+    sh.line.width = Pt(1.25)
+    sh.shadow.inherit = False
+    tf = sh.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = Cm(0.08)
+    for i, line in enumerate(text.split("\n")):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.alignment = PP_ALIGN.CENTER
+        r = p.add_run()
+        r.text = line
+        set_font(r, size=9, bold=bold, color=BODY_TEXT)
+    return sh
+
+
+def _flow_arrow(slide, x1, y1, x2, y2, label=None, label_at=None):
+    c = slide.shapes.add_connector(1, Cm(x1), Cm(y1), Cm(x2), Cm(y2))
+    c.line.color.rgb = GRAY_TEXT
+    c.line.width = Pt(1.25)
+    ln = c.line._get_or_add_ln()
+    tail = ln.makeelement(qn("a:tailEnd"), {"type": "triangle", "w": "med", "len": "med"})
+    ln.append(tail)
+    if label:
+        lx, ly = label_at
+        add_textbox(slide, lx, ly, 1.6, 0.45, label, size=8, color=GRAY_TEXT)
+
+
+def build_flow_slide(prs, sb_id, title, flow, items, status_text="변경", summary=None, side_gap=1.6):
+    """
+    여러 단계·분기가 있는 동작(업로드, 저장 검증, 결제, 승인 등)을 왼쪽 플로우차트 + 오른쪽 번호 설명으로 그린다.
+    글로만 나열하면 검사 순서와 갈림길이 안 보이므로, 분기가 2개 이상인 동작은 이 슬라이드를 쓴다.
+
+    flow: 위에서 아래로 내려가는 본 흐름 단계 목록. 각 단계는 dict:
+        {"text": "파일 선택됨?", "kind": "start|process|decision|end",
+         "down": "예",                       # 다음 단계로 가는 화살표 라벨(선택)
+         "side": {"text": "알럿 ① · 중단",   # 옆으로 빠지는 결과(선택)
+                  "label": "아니오", "tone": "fail|neutral|ok"}}
+      - decision 은 마름모, process 는 사각형, start/end 는 둥근 사각형.
+      - 그림 안에는 짧은 라벨만 넣고 번호(①~)를 붙인다. 알럿·확인창 문구 원문은 items 설명에만 「」로 적는다
+        (같은 문구를 그림과 설명에 두 번 쓰지 않는다).
+    items: 오른쪽 설명 [(번호, 제목, [설명 줄, ...]), ...] — 번호는 그림 안 번호와 맞춘다.
+    """
+    slide = new_slide(prs)
+    add_header(slide, sb_id, title, status_text)
+    top = 2.84
+    if summary:
+        add_summary(slide, summary)
+        top = 4.4
+    main_cx, main_w, dec_w, dec_h, box_h = PAGE_L + 3.6, 5.9, 6.5, 1.55, 1.0
+    side_w = 4.5
+    side_cx = main_cx + dec_w / 2 + side_gap + side_w / 2
+    heights = [dec_h if st.get("kind") == "decision" else box_h for st in flow]
+    avail = 18.4 - top - heights[0] / 2 - heights[-1] / 2
+    pitch = min(2.1, avail / max(1, len(flow) - 1))
+    ys = [top + heights[0] / 2 + i * pitch for i in range(len(flow))]
+    for i, st in enumerate(flow):
+        kind = st.get("kind", "process")
+        is_end = kind in ("start", "end")
+        _flow_node(slide, kind, main_cx, ys[i], dec_w if kind == "decision" else main_w, heights[i], st["text"],
+                   fill=FLOW_LIGHT if kind in ("decision", "end") else WHITE, bold=is_end)
+        if i < len(flow) - 1:
+            y1, y2 = ys[i] + heights[i] / 2, ys[i + 1] - heights[i + 1] / 2
+            _flow_arrow(slide, main_cx, y1, main_cx, y2, st.get("down"), (main_cx + 0.15, (y1 + y2) / 2 - 0.25))
+        sd = st.get("side")
+        if sd:
+            tone = sd.get("tone", "fail")
+            border = {"fail": FLOW_RED, "neutral": GRAY_TEXT, "ok": BLUE}[tone]
+            sh_h = box_h if "\n" not in sd["text"] else box_h + 0.4
+            _flow_node(slide, "end", side_cx, ys[i], side_w, sh_h, sd["text"], border=border)
+            x1 = main_cx + (dec_w if kind == "decision" else main_w) / 2
+            _flow_arrow(slide, x1, ys[i], side_cx - side_w / 2, ys[i], sd.get("label"), (x1 + 0.1, ys[i] - 0.55))
+    # 오른쪽 설명
+    rx = side_cx + side_w / 2 + 1.2
+    rw = PAGE_L + PAGE_W - rx
+    y = top
+    cpl = max(10, int(rw / 0.33))  # 9.5pt 한글 기준 줄당 대략 글자 수
+    for num, ttl, lines in items:
+        add_oval_badge(slide, rx, y, 0.48, num, fill=BLUE, font_size=8.5)
+        add_textbox(slide, rx + 0.66, y + 0.02, rw - 0.66, 0.55, ttl, size=11, bold=True, color=BLUE_DARK)
+        y += 0.65
+        for line in lines:
+            n = max(1, -(-len(line) // cpl))
+            add_textbox(slide, rx, y, rw, 0.45 * n, line, size=9.5, color=DESC_TEXT, line_spacing=1.1)
+            y += 0.45 * n
+        y += 0.35
+    return slide
+
+
+# =========================================================
 # 렌더 검증 / 안전한 파일 조작 유틸 (PowerPoint COM)
 # =========================================================
 def close_if_open(pptx_path):
