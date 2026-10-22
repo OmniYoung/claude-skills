@@ -547,6 +547,97 @@ def build_flow_slide(prs, sb_id, title, flow, items, status_text="변경", summa
 
 
 # =========================================================
+# 화면 명세 슬라이드 (왼쪽 캡처 + 번호 박스, 오른쪽 번호 설명 · 넘치면 캡처 아래로 이어 씀)
+# =========================================================
+def add_paras(slide, l, t, w, h, lines, size=9, color=DESC_TEXT, line_spacing=1.15):
+    """여러 줄 설명. lines 는 str 또는 list[str] (줄마다 문단)."""
+    if isinstance(lines, str):
+        lines = [lines]
+    tb = slide.shapes.add_textbox(Cm(l), Cm(t), Cm(w), Cm(h))
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    for i, ln in enumerate(lines):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.line_spacing = line_spacing
+        r = p.add_run()
+        r.text = ln
+        set_font(r, size=size, color=color)
+    return tb
+
+
+def estimate_text_h(lines, width_cm, size=9, line_spacing=1.15):
+    """한글 위주 텍스트 높이 추정(cm). 실제 렌더로 한 번 더 확인할 것."""
+    if isinstance(lines, str):
+        lines = [lines]
+    per = max(8, int(width_cm / (size * 0.0353 * 0.82)))
+    n = sum(max(1, -(-len(s) // per)) for s in lines)
+    return n * size * 0.0353 * line_spacing * 1.18 + 0.05
+
+
+def build_screen_slide(prs, sb_id, title, status_text, summary, img_path, crop_w, crop_h, boxes_px_rel, items,
+                       img_w=16.0, cols=1, below=False, sum_h=1.5, size=9):
+    """
+    화면 영역 하나를 설명하는 슬라이드. 표(컬럼) 화면은 build_column_slide, 일반 화면 영역은 이 함수를 쓴다.
+    img_path / crop_w / crop_h / boxes_px_rel: build_column_slide 와 같은 규칙(크롭 이미지 기준 픽셀 박스 {번호: (x, y, w, h)}).
+    items: [(번호, 제목, 설명 str|list[str])] — 설명 안 화면 문구는 「」로 그대로 인용.
+    cols: 오른쪽 설명 단 수(1~2). below=True 면 오른쪽이 차면 캡처 아래 2단으로 이어서 채운다(항목이 많을 때).
+    번호 박스끼리 왼쪽 위 모서리가 겹치면 배지가 가려지니, 박스 대상을 안쪽 요소로 바꿔 캡처한다.
+    """
+    slide = new_slide(prs)
+    add_header(slide, sb_id, title, status_text)
+    top = 2.84
+    if summary:
+        add_summary(slide, summary, height=sum_h, size=9.5)
+        top = 2.84 + sum_h + 0.45
+    w = img_w
+    if w * crop_h / crop_w > 18.6 - top:
+        w = (18.6 - top) * crop_w / crop_h
+    ih = w * crop_h / crop_w
+    slide.shapes.add_picture(img_path, Cm(PAGE_L), Cm(top), Cm(w), Cm(ih))
+    add_rect(slide, PAGE_L, top, w, ih, fill=None, line_color=BORDER_GRAY, line_w_pt=0.75)
+    s = w / crop_w
+    badges = []
+    for num, (x, y, bw, bh) in boxes_px_rel.items():
+        add_rect(slide, PAGE_L + x * s, top + y * s, bw * s, bh * s, fill=None, line_color=BLUE, line_w_pt=1.5)
+        badges.append((PAGE_L + x * s - 0.24, top + y * s - 0.24, num))
+    for bl, bt, num in badges:          # 박스를 다 그린 뒤 배지 (가림 방지)
+        add_oval_badge(slide, bl, bt, 0.48, num, font_size=8.5)
+    tx = PAGE_L + w + 0.9
+    gap = 0.6
+    cw = (PAGE_L + PAGE_W - tx - gap * (cols - 1)) / cols
+    regions = [[tx + c * (cw + gap), top, cw] for c in range(cols)]
+    if below:
+        bw2 = (w - gap) / 2
+        regions += [[PAGE_L, top + ih + 0.5, bw2], [PAGE_L + bw2 + gap, top + ih + 0.5, bw2]]
+
+    def block(x, y, rw, num, ttl, desc):
+        add_oval_badge(slide, x, y, 0.48, num, font_size=8.5)
+        add_textbox(slide, x + 0.66, y, rw - 0.66, 0.5, ttl, size=10.5, bold=True, color=BLUE_DARK)
+        h = estimate_text_h(desc, rw, size)
+        add_paras(slide, x, y + 0.58, rw, h, desc, size=size)
+        return y + 0.58 + h + 0.35
+
+    if cols > 1 and not below:          # 단 높이 균형
+        hs = [0.93 + estimate_text_h(d, cw, size) for _, _, d in items]
+        target, ri, acc = sum(hs) / cols, 0, 0
+        for i, (num, ttl, desc) in enumerate(items):
+            if ri < cols - 1 and acc > 0 and acc + hs[i] / 2 > target:
+                ri, acc = ri + 1, 0
+            x, y, rw = regions[ri]
+            regions[ri][1] = block(x, y, rw, num, ttl, desc)
+            acc += hs[i]
+    else:
+        ri = 0
+        for num, ttl, desc in items:
+            while ri < len(regions) - 1 and regions[ri][1] + 0.58 + estimate_text_h(desc, regions[ri][2], size) > 18.7:
+                ri += 1
+            x, y, rw = regions[ri]
+            regions[ri][1] = block(x, y, rw, num, ttl, desc)
+    return slide
+
+
+# =========================================================
 # 렌더 검증 / 안전한 파일 조작 유틸 (PowerPoint COM)
 # =========================================================
 def close_if_open(pptx_path):
