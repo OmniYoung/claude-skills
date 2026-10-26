@@ -711,3 +711,41 @@ def render_slides_to_png(pptx_path, out_dir, slide_numbers=None, width=2400, hei
 def open_in_powerpoint(pptx_path):
     """작업 종료 시 사용자에게 결과물을 보여주기 위해 기본 연결 프로그램(PowerPoint)으로 연다."""
     os.startfile(pptx_path)  # Windows 전용
+
+
+def add_sections(prs, groups):
+    """PowerPoint 구역(섹션) 추가. SB가 20장을 넘으면 화면 단위로 나눠 둘 것.
+    groups: [(구역 이름, 첫 SB 번호 int, 첫 구역은 None=표지 · 버전 포함)] 순서대로.
+    각 슬라이드 헤더 배지의 SB 번호('SB-07')로 구역을 판정한다. prs.save 직전에 호출."""
+    import re as _re, uuid
+    from lxml import etree
+    P14 = 'http://schemas.microsoft.com/office/powerpoint/2010/main'
+    sb_of = []
+    for sl in prs.slides:
+        m = None
+        for sh in sl.shapes:
+            if sh.has_text_frame and _re.fullmatch(r'SB-\d\d', sh.text_frame.text.strip()):
+                m = int(sh.text_frame.text.strip()[3:]); break
+        sb_of.append(m)
+    starts = [g[1] for g in groups]
+    buckets = [[] for _ in groups]
+    gi = 0
+    for sl, n in zip(prs.slides._sldIdLst, sb_of):
+        while gi + 1 < len(groups) and n is not None and n >= starts[gi + 1]:
+            gi += 1
+        buckets[gi].append(sl.get('id'))
+    pres = prs.part._element
+    ext_lst = pres.find('{http://schemas.openxmlformats.org/presentationml/2006/main}extLst')
+    if ext_lst is None:
+        ext_lst = etree.SubElement(pres, '{http://schemas.openxmlformats.org/presentationml/2006/main}extLst')
+    for e in list(ext_lst):
+        if e.get('uri') == '{521415D9-36F7-43E2-AB2F-B90AF26B5E84}':
+            ext_lst.remove(e)
+    ext = etree.SubElement(ext_lst, '{http://schemas.openxmlformats.org/presentationml/2006/main}ext', uri='{521415D9-36F7-43E2-AB2F-B90AF26B5E84}')
+    lst = etree.SubElement(ext, '{%s}sectionLst' % P14, nsmap={'p14': P14})
+    for (name, _), ids in zip(groups, buckets):
+        sec = etree.SubElement(lst, '{%s}section' % P14, name=name, id='{%s}' % str(uuid.uuid4()).upper())
+        il = etree.SubElement(sec, '{%s}sldIdLst' % P14)
+        for i in ids:
+            etree.SubElement(il, '{%s}sldId' % P14, id=i)
+
