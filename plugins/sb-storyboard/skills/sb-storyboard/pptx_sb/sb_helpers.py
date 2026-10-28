@@ -392,59 +392,67 @@ def build_column_slide(prs, sb_id, section_label, img_path, crop_w, crop_h, boxe
 # =========================================================
 # 인터랙션 상태 슬라이드 (hover/click/dblclick 캡처 모음)
 # =========================================================
-def build_state_row(slide, items_row, row_top, row_h, img_max_h, state_dir):
-    """items_row: [(번호, 제목, 이미지파일명, 설명)]. 이미지파일명은 state_dir 기준 상대경로."""
-    gap = 0.6
-    title_h = 0.55
+def _est_text_h(text, width_cm, size=9, line_spacing=1.15):
+    """설명 텍스트 높이 추정(한글 한 글자 ≈ 글자 크기 pt × 0.036cm, 영숫자는 그 절반)."""
+    lines = 0
+    for para in text.split("\n"):
+        w = sum(size * (0.036 if ord(ch) > 0x2000 else 0.02) for ch in para)
+        lines += max(1, int(w / max(width_cm, 1)) + (1 if w % max(width_cm, 1) > 0 else 0)) if para else 1
+    return lines * size * 0.0353 * line_spacing + 0.15
+
+
+def build_state_row(slide, items_row, row_top, row_h, img_max_h, state_dir, img_frac=0.6):
+    """items_row: [(번호, 제목, 이미지파일명, 설명)]. 이미지파일명은 state_dir 기준 상대경로.
+    배치: 칸마다 왼쪽 캡처 · 오른쪽 번호 · 제목 · 설명. 모든 상태 슬라이드에서 같은 배치로 통일한다
+    (다른 화면 슬라이드도 캡처 왼쪽 · 설명 오른쪽이라 한 기획서 안에서 맞춤, 2026-10-28 피드백).
+    가로로 긴 캡처는 한 행에 한 칸씩 넣는다. row_h는 무시하고 실제로 쓴 행 높이를 돌려준다."""
+    gap = 0.8
     n_cols = len(items_row)
     col_w = (PAGE_W - (n_cols - 1) * gap) / n_cols
-    for c, (num, title, img_name, desc) in enumerate(items_row):
-        cell_l = PAGE_L + c * (col_w + gap)
-        cell_t = row_top
-
-        # 배치: 캡처(칸 위 · 왼쪽) → 그 캡처 바로 아래 번호 · 제목 → 설명. 모든 상태 슬라이드에서 같은 순서로 통일한다
-        # (번호를 캡처 위에 붙였다 아래 붙였다 하면 통일성이 없다는 피드백, 2026-10-28).
+    cells = []
+    for num, title, img_name, desc in items_row:
         img_path = os.path.join(state_dir, img_name)
         with Image.open(img_path) as im:
             px_w, px_h = im.size
-        scale = min(col_w / px_w, img_max_h / px_h)
+        scale = min(col_w * img_frac / px_w, img_max_h / px_h)
         disp_w, disp_h = px_w * scale, px_h * scale
-        img_l = cell_l
-        img_t = cell_t
-        slide.shapes.add_picture(img_path, Cm(img_l), Cm(img_t), Cm(disp_w), Cm(disp_h))
-        add_rect(slide, img_l, img_t, disp_w, disp_h, fill=None, line_color=BORDER_GRAY, line_w_pt=0.5)
-
-        title_t = cell_t + disp_h + 0.25   # 각 캡처 바로 아래(짧은 캡처가 설명과 떨어져 보이지 않게)
-        add_oval_badge(slide, cell_l, title_t, 0.48, num, fill=BLUE, font_size=8.5)
-        add_textbox(slide, cell_l + 0.66, title_t + 0.02, col_w - 0.66, title_h, title,
+        text_w = col_w - disp_w - 0.5
+        text_h = 0.6 + _est_text_h(desc, text_w)
+        cells.append((num, title, img_path, desc, disp_w, disp_h, text_w, text_h))
+    used_h = max(max(c[5], c[7]) for c in cells)
+    for c, (num, title, img_path, desc, disp_w, disp_h, text_w, text_h) in enumerate(cells):
+        cell_l = PAGE_L + c * (col_w + gap)
+        slide.shapes.add_picture(img_path, Cm(cell_l), Cm(row_top), Cm(disp_w), Cm(disp_h))
+        add_rect(slide, cell_l, row_top, disp_w, disp_h, fill=None, line_color=BORDER_GRAY, line_w_pt=0.5)
+        tx = cell_l + disp_w + 0.5
+        add_oval_badge(slide, tx, row_top, 0.48, num, fill=BLUE, font_size=8.5)
+        add_textbox(slide, tx + 0.66, row_top + 0.02, text_w - 0.66, 0.55, title,
                     size=11, bold=True, color=BLUE_DARK)
-
-        desc_t = title_t + title_h + 0.05
-        add_textbox(slide, cell_l, desc_t, col_w, row_h - (desc_t - cell_t), desc,
+        add_textbox(slide, tx, row_top + 0.6, text_w, used_h - 0.6, desc,
                     size=9, color=DESC_TEXT, line_spacing=1.15)
+    return used_h
 
 
 def build_states_slide(prs, sb_id, part_label, rows, state_dir, img_max_h=4.4, title="인터랙션 상태",
                         status_text="공통 상태",
-                        summary_text="마우스 오버·클릭·더블클릭에서만 나타나는 화면 상태를 캡처했다."):
+                        summary_text="마우스 오버·클릭·더블클릭에서만 나타나는 화면 상태를 캡처했다.",
+                        img_frac=0.6):
     """
-    rows: [[items_row1], [items_row2], ...] — 각 행에 원하는 개수(보통 2~3개)의 항목을 담는다.
-    한 슬라이드에 최대 2행까지가 안전하다(img_max_h=4.4 기준, row_top=4.5부터 시작해서 슬라이드
-    높이 19.05cm를 넘김). 항목이 더 많으면 슬라이드를 나누고 sb_id/part_label을 (n/총장수)로 늘릴 것
-    — 부록으로 따로 빼지 말고 인터랙션 상태 슬라이드 자체를 나누는 쪽을 사용자가 선호함
-    (2026-09 확인, memory/feedback_ui_planning_html_then_sb.md 참고).
+    rows: [[items_row1], [items_row2], ...]. 한 행에 1~2칸(왼쪽 캡처 · 오른쪽 설명이라 3칸이면 좁다).
+    가로로 긴 캡처(목록 행 · 배너 등)는 한 행에 한 칸. 행 높이는 캡처와 설명 중 큰 쪽에 맞춰 자동으로 정해진다.
+    슬라이드 높이(19.05cm)를 넘으면 경고를 출력한다. 넘치면 부록으로 빼지 말고 슬라이드를 (n/총장수)로 나눌 것.
     스크린샷에만 있고 텍스트로는 없는 문구(툴팁·토스트·안내문 등)는 반드시 desc에 그대로
-    인용부호로 옮겨 적을 것 — 개발자가 스크린샷 없이도 그 문구를 복사해 쓸 수 있어야 한다.
+    인용부호로 옮겨 적을 것. 개발자가 스크린샷 없이도 그 문구를 복사해 쓸 수 있어야 한다.
     """
     slide = new_slide(prs)
     add_header(slide, sb_id, f"{title} {part_label}", status_text)
     add_summary(slide, summary_text)
-    row_h = img_max_h + 0.25 + 0.55 + 0.9
-    row_gap = 0.5
+    row_gap = 0.6
     row_top = 4.5
     for items_row in rows:
-        build_state_row(slide, items_row, row_top, row_h, img_max_h, state_dir)
-        row_top += row_h + row_gap
+        row_top += build_state_row(slide, items_row, row_top, None, img_max_h, state_dir, img_frac) + row_gap
+    if row_top - row_gap > 19.0:
+        print(f"  !! {sb_id} {part_label} 상태 슬라이드 넘침 {row_top - row_gap:.1f}cm")
     return slide
 
 
