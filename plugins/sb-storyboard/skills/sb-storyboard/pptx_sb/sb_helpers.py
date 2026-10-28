@@ -402,21 +402,24 @@ def build_state_row(slide, items_row, row_top, row_h, img_max_h, state_dir):
         cell_l = PAGE_L + c * (col_w + gap)
         cell_t = row_top
 
-        add_oval_badge(slide, cell_l, cell_t, 0.48, num, fill=BLUE, font_size=8.5)
-        add_textbox(slide, cell_l + 0.66, cell_t + 0.02, col_w - 0.66, title_h, title,
-                    size=11, bold=True, color=BLUE_DARK)
-
+        # 배치: 캡처(칸 위 · 왼쪽) → 번호 · 제목 → 설명. 모든 상태 슬라이드에서 같은 순서로 통일한다
+        # (번호를 캡처 위에 붙였다 아래 붙였다 하면 통일성이 없다는 피드백, 2026-10-28).
         img_path = os.path.join(state_dir, img_name)
         with Image.open(img_path) as im:
             px_w, px_h = im.size
         scale = min(col_w / px_w, img_max_h / px_h)
         disp_w, disp_h = px_w * scale, px_h * scale
-        img_l = cell_l + (col_w - disp_w) / 2
-        img_t = cell_t + title_h + (img_max_h - disp_h) / 2
+        img_l = cell_l
+        img_t = cell_t
         slide.shapes.add_picture(img_path, Cm(img_l), Cm(img_t), Cm(disp_w), Cm(disp_h))
         add_rect(slide, img_l, img_t, disp_w, disp_h, fill=None, line_color=BORDER_GRAY, line_w_pt=0.5)
 
-        desc_t = cell_t + title_h + img_max_h + 0.1
+        title_t = cell_t + img_max_h + 0.25
+        add_oval_badge(slide, cell_l, title_t, 0.48, num, fill=BLUE, font_size=8.5)
+        add_textbox(slide, cell_l + 0.66, title_t + 0.02, col_w - 0.66, title_h, title,
+                    size=11, bold=True, color=BLUE_DARK)
+
+        desc_t = title_t + title_h + 0.05
         add_textbox(slide, cell_l, desc_t, col_w, row_h - (desc_t - cell_t), desc,
                     size=9, color=DESC_TEXT, line_spacing=1.15)
 
@@ -436,7 +439,7 @@ def build_states_slide(prs, sb_id, part_label, rows, state_dir, img_max_h=4.4, t
     slide = new_slide(prs)
     add_header(slide, sb_id, f"{title} {part_label}", status_text)
     add_summary(slide, summary_text)
-    row_h = 0.55 + img_max_h + 0.9
+    row_h = img_max_h + 0.25 + 0.55 + 0.9
     row_gap = 0.5
     row_top = 4.5
     for items_row in rows:
