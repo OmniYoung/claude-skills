@@ -402,7 +402,7 @@ def build_state_row(slide, items_row, row_top, row_h, img_max_h, state_dir):
         cell_l = PAGE_L + c * (col_w + gap)
         cell_t = row_top
 
-        # 배치: 캡처(칸 위 · 왼쪽) → 번호 · 제목 → 설명. 모든 상태 슬라이드에서 같은 순서로 통일한다
+        # 배치: 캡처(칸 위 · 왼쪽) → 그 캡처 바로 아래 번호 · 제목 → 설명. 모든 상태 슬라이드에서 같은 순서로 통일한다
         # (번호를 캡처 위에 붙였다 아래 붙였다 하면 통일성이 없다는 피드백, 2026-10-28).
         img_path = os.path.join(state_dir, img_name)
         with Image.open(img_path) as im:
@@ -414,7 +414,7 @@ def build_state_row(slide, items_row, row_top, row_h, img_max_h, state_dir):
         slide.shapes.add_picture(img_path, Cm(img_l), Cm(img_t), Cm(disp_w), Cm(disp_h))
         add_rect(slide, img_l, img_t, disp_w, disp_h, fill=None, line_color=BORDER_GRAY, line_w_pt=0.5)
 
-        title_t = cell_t + img_max_h + 0.25
+        title_t = cell_t + disp_h + 0.25   # 각 캡처 바로 아래(짧은 캡처가 설명과 떨어져 보이지 않게)
         add_oval_badge(slide, cell_l, title_t, 0.48, num, fill=BLUE, font_size=8.5)
         add_textbox(slide, cell_l + 0.66, title_t + 0.02, col_w - 0.66, title_h, title,
                     size=11, bold=True, color=BLUE_DARK)
