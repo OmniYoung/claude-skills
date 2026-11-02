@@ -209,8 +209,10 @@ def _summary_lines(bullets, size):
         items = [x for col in bullets for x in col]
     else:
         items = list(bullets or [])
-    per = int((PAGE_W - 1.2) / (size * 0.0353 * 0.9))
-    return sum(max(1, -(-len(x) // per)) for x in items)
+    avail = PAGE_W - 1.4
+    def width(x):  # 한글 · 전각 약 0.92em, 영문 · 숫자 · 공백 약 0.5em
+        return sum((0.92 if ord(ch) >= 0x1100 else 0.5) for ch in x) * size * 0.0353
+    return sum(max(1, -(-width(x) // avail)) for x in items)
 
 
 def add_summary(slide, bullets, height=None, size=9.5):
@@ -222,8 +224,13 @@ def add_summary(slide, bullets, height=None, size=9.5):
     문장이 길면 한 문단에 다 몰아넣지 말고 불릿로 쪼개는 쪽이 가독성이 좋다
     (2026-09 재고 대시보드 SB에서 사용자 피드백으로 확립).
     """
-    if height is None:
-        height = 0.5 + 0.42 * _summary_lines(bullets, size)
+    if isinstance(bullets, str):   # 한 문장도 점 있는 목록으로(모든 장 같은 모양)
+        bullets = [bullets]
+    if bullets and not isinstance(bullets[0], list):   # 요약 줄 끝 마침표 없이 통일
+        bullets = [x[:-1] if x.endswith('.') else x for x in bullets]
+    if height is None:   # 줄 높이 + 문단 간격을 실제대로, 위아래 여백은 줄 수와 관계없이 같게
+        n_par = len(bullets) if not isinstance(bullets[0], list) else max(len(c) for c in bullets)
+        height = 2 * 0.25 + size * 0.0421 * _summary_lines(bullets, size) + 0.106 * (n_par - 1)
     add_rect(slide, PAGE_L, 2.84, PAGE_W, height, fill=SUMMARY_BG, line_color=SUMMARY_BORDER,
               line_w_pt=1.0, rounded=True)
     inner_w = PAGE_W - 0.36  # 좌우 각 0.36cm 여백 확보한 텍스트 폭
