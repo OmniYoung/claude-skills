@@ -202,7 +202,18 @@ def add_header(slide, sb_id, title_text, status_text):
     ln.line.width = Pt(1.6)
 
 
-def add_summary(slide, bullets, height=1.17, size=10.5):
+def _summary_lines(bullets, size):
+    if isinstance(bullets, str):
+        items = [bullets]
+    elif bullets and isinstance(bullets[0], list):
+        items = [x for col in bullets for x in col]
+    else:
+        items = list(bullets or [])
+    per = int((PAGE_W - 1.2) / (size * 0.0353 * 0.9))
+    return sum(max(1, -(-len(x) // per)) for x in items)
+
+
+def add_summary(slide, bullets, height=None, size=9.5):
     """
     상단 요약 박스. `bullets`는 세 가지 형태를 받는다:
       - str: 기존 방식의 한 문단 텍스트(줄글)
@@ -211,6 +222,8 @@ def add_summary(slide, bullets, height=1.17, size=10.5):
     문장이 길면 한 문단에 다 몰아넣지 말고 불릿로 쪼개는 쪽이 가독성이 좋다
     (2026-09 재고 대시보드 SB에서 사용자 피드백으로 확립).
     """
+    if height is None:
+        height = 0.5 + 0.42 * _summary_lines(bullets, size)
     add_rect(slide, PAGE_L, 2.84, PAGE_W, height, fill=SUMMARY_BG, line_color=SUMMARY_BORDER,
               line_w_pt=1.0, rounded=True)
     inner_w = PAGE_W - 0.36  # 좌우 각 0.36cm 여백 확보한 텍스트 폭
@@ -226,6 +239,7 @@ def add_summary(slide, bullets, height=1.17, size=10.5):
     else:
         add_bullet_textbox(slide, PAGE_L + 0.36, 2.84, inner_w, height, bullets, size=size, color=BODY_TEXT,
                             anchor=MSO_ANCHOR.MIDDLE, line_spacing=1.2)
+    return height
 
 
 # =========================================================
