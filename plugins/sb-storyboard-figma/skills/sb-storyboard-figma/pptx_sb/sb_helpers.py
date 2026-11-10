@@ -252,13 +252,35 @@ def add_summary(slide, bullets, height=None, size=9.5):
 # =========================================================
 # 표지 슬라이드 (v1.6 원본에서 python-pptx로 좌표·폰트 직접 추출해 재현)
 # =========================================================
-def build_cover_slide(prs, title, subtitle, toc_lines):
+def build_cover_slide(prs, title, subtitle, toc_lines, toc_cols=3):
     """
-    배경 단색 BLUE, 흰 타이틀(34pt bold) + 부제(13.5pt) + 흰 구분선 + TOC(11pt, 연한 하늘색).
+    배경 단색 BLUE, 흰 타이틀(34pt bold) + 부제(13.5pt) + 흰 구분선 + TOC(연한 하늘색).
     title이 2줄로 접힐 걸 감안해 타이틀 박스 높이(2.986cm)에 여유를 뒀다 — 1줄일 땐 자동으로
     가운데 정렬되지 않고 위쪽에 붙으므로, 짧은 타이틀도 이 함수 그대로 써도 무방하다.
     subtitle 이하 요소 좌표는 이 여유폭 기준으로 고정돼 있다.
+    toc_lines:
+      - [(구역 이름, [항목, ...]), ...]  → 왼쪽 구역 이름 칸(굵은 흰 글씨) + 오른쪽 toc_cols열 격자(권장).
+        SB 번호가 세로로 줄 맞고 구역이 끊어져 보인다. 첫 구역 이름은 "" 로 두면 「버전 관리 · SB-01」 줄.
+      - [문자열, ...]  → 예전 방식(한 줄씩 나열). 기존 빌드 스크립트 호환용.
     """
+    if toc_lines and isinstance(toc_lines[0], (tuple, list)):
+        cover = new_slide(prs)
+        cover.background.fill.solid()
+        cover.background.fill.fore_color.rgb = BLUE
+        add_textbox(cover, 2.54, 5.461, 28.70, 2.986, title, size=34, bold=True, color=WHITE)
+        add_textbox(cover, 2.54, 8.447, 28.70, 1.016, subtitle, size=13.5, color=WHITE)
+        divider = cover.shapes.add_connector(1, Cm(2.54), Cm(9.895), Cm(2.54 + 10.668), Cm(9.895))
+        divider.line.color.rgb = WHITE
+        divider.line.width = Pt(1.4)
+        ty, rh, cw = 11.0, 0.52, 25.8 / toc_cols
+        for grp, items in toc_lines:
+            if grp:
+                add_textbox(cover, 2.54, ty, 3.0, rh, grp, size=10.5, bold=True, color=WHITE)
+            for k, it in enumerate(items):
+                add_textbox(cover, 5.8 + (k % toc_cols) * cw, ty + (k // toc_cols) * rh, cw - 0.2, rh, it,
+                            size=10.5, color=TOC_TEXT_COLOR)
+            ty += ((len(items) - 1) // toc_cols + 1) * rh + 0.22
+        return cover
     cover = new_slide(prs)
     cover.background.fill.solid()
     cover.background.fill.fore_color.rgb = BLUE
@@ -748,7 +770,8 @@ def open_in_powerpoint(pptx_path):
 def add_sections(prs, groups):
     """PowerPoint 구역(섹션) 추가. SB가 20장을 넘으면 화면 단위로 나눠 둘 것.
     groups: [(구역 이름, 첫 SB 번호 int, 첫 구역은 None=표지 · 버전 포함)] 순서대로.
-    각 슬라이드 헤더 배지의 SB 번호('SB-07')로 구역을 판정한다. prs.save 직전에 호출."""
+    각 슬라이드 헤더 배지의 SB 번호('SB-07')로 구역을 판정한다. prs.save 직전에 호출.
+    맨 뒤 참고 장(배지 「참고 1」 등, SB 번호 없음)은 groups 끝에 ("참고", "참고") 를 두면 그 구역으로 모인다."""
     import re as _re, uuid
     from lxml import etree
     P14 = 'http://schemas.microsoft.com/office/powerpoint/2010/main'
@@ -758,13 +781,18 @@ def add_sections(prs, groups):
         for sh in sl.shapes:
             if sh.has_text_frame and _re.fullmatch(r'SB-\d\d', sh.text_frame.text.strip()):
                 m = int(sh.text_frame.text.strip()[3:]); break
+            if sh.has_text_frame and sh.text_frame.text.strip().startswith('참고') and sh.top < Cm(3):
+                m = '참고'; break   # 상단 배지만(표지 목차의 「참고」 글자는 제외)
         sb_of.append(m)
     starts = [g[1] for g in groups]
     buckets = [[] for _ in groups]
     gi = 0
     for sl, n in zip(prs.slides._sldIdLst, sb_of):
-        while gi + 1 < len(groups) and n is not None and n >= starts[gi + 1]:
-            gi += 1
+        if n == '참고' and '참고' in starts:
+            gi = starts.index('참고')
+        else:
+            while gi + 1 < len(groups) and isinstance(n, int) and isinstance(starts[gi + 1], int) and n >= starts[gi + 1]:
+                gi += 1
         buckets[gi].append(sl.get('id'))
     pres = prs.part._element
     ext_lst = pres.find('{http://schemas.openxmlformats.org/presentationml/2006/main}extLst')
