@@ -821,20 +821,20 @@ def scr_levels(lines):
     return out
 
 
-def scr_desc_h(lines, w, size=SCR_FONT):
+def scr_desc_h(lines, w, size=SCR_FONT, always=False):
     """항목 설명 높이. 문장이 둘 이상이면 단계별 불릿 + 내어쓰기 폭 기준"""
     lines = scr_levels(lines)
     if not lines:
         return 0
-    if len(lines) == 1:
+    if len(lines) == 1 and not always:
         return text_h_ko([lines[0][1]], w, size)
     return sum(text_h_ko([x], w - SCR_LV[lv][0], size) - 0.05 for lv, x in lines) + 0.05
 
 
-def scr_desc(slide, l, t, w, h, lines, size=SCR_FONT, color=DESC_TEXT):
+def scr_desc(slide, l, t, w, h, lines, size=SCR_FONT, color=DESC_TEXT, always=False):
     """항목 설명: 한 문장이면 그대로, 둘 이상이면 문장마다 앞에 불릿(1단계 •, 2단계 – 더 들여씀). 넘어가는 줄은 글자 위치에 맞춤"""
     lines = scr_levels(lines)
-    if len(lines) <= 1:
+    if not lines or (len(lines) == 1 and not always):   # always=True: 한 줄도 불릿(요약 박스)
         return _scr_paras(slide, l, t, w, h, [x for _, x in lines], size=size, color=color)
     tb = slide.shapes.add_textbox(Cm(l), Cm(t), Cm(w), Cm(h))
     tf = tb.text_frame
@@ -1050,7 +1050,7 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
                                                       for z in split_sentences(x) for y in z.split('\n') if y.strip()]))
 
     def sum_h(lines):
-        return text_h_ko(['• ' + b for b in lines], DW - 0.5, size) + 0.5
+        return scr_desc_h(lines, DW - 0.5, size, always=True) + 0.5   # 요약 박스도 불릿 + 내어쓰기
 
     def bh(b):
         if b['kind'] == 'H':
@@ -1168,7 +1168,7 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
                 if b['summary']:
                     shh = sum_h(b['summary'])
                     add_rect(s, DX, y, DW, shh, fill=SUMMARY_BG, line_color=SUMMARY_BORDER, line_w_pt=0.75)
-                    _scr_paras(s, DX + 0.25, y + 0.2, DW - 0.5, shh - 0.4, ['• ' + t for t in b['summary']], size=size, color=BODY_TEXT)
+                    scr_desc(s, DX + 0.25, y + 0.2, DW - 0.5, shh - 0.4, b['summary'], size=size, color=BODY_TEXT, always=True)
                     y += shh + 0.35
                 elif b['part']:
                     y += 0.25
