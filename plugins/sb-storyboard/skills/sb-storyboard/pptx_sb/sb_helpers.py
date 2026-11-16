@@ -80,6 +80,8 @@ def set_font(run, name="Malgun Gothic", size=11, bold=None, color=BODY_TEXT):
         ea = rPr.makeelement(qn('a:ea'), {})
         rPr.append(ea)
     ea.set('typeface', name)
+    rPr.set('lang', 'ko-KR')   # 한국어 지정: PowerPoint가 한글을 단어 단위로 줄바꿈(지정 없으면 「오/더」처럼 글자 단위로 끊음)
+    rPr.set('altLang', 'en-US')
 
 
 def add_textbox(slide, l, t, w, h, text, name="Malgun Gothic", size=11, bold=None,
@@ -261,8 +263,11 @@ def build_cover_slide(prs, title, subtitle, toc_lines, toc_cols=3):
     toc_lines:
       - [(구역 이름, [항목, ...]), ...]  → 왼쪽 구역 이름 칸(굵은 흰 글씨) + 오른쪽 toc_cols열 격자(권장).
         SB 번호가 세로로 줄 맞고 구역이 끊어져 보인다. 첫 구역 이름은 "" 로 두면 「버전 관리 · SB-01」 줄.
+        항목이 10줄 이하면(화면 단위 SB 등) 구역 칸 없이 세로 목록으로 그린다.
       - [문자열, ...]  → 예전 방식(한 줄씩 나열). 기존 빌드 스크립트 호환용.
     """
+    if toc_lines and isinstance(toc_lines[0], (tuple, list)) and sum(len(x[1]) for x in toc_lines) <= 10:
+        toc_lines = [it for _, items in toc_lines for it in items]   # SB가 적으면(10줄 이하) 구역 칸 없이 세로 목록
     if toc_lines and isinstance(toc_lines[0], (tuple, list)):
         cover = new_slide(prs)
         cover.background.fill.solid()
@@ -689,6 +694,513 @@ def build_screen_slide(prs, sb_id, title, status_text, summary, img_path, crop_w
             x, y, rw = regions[ri]
             regions[ri][1] = block(x, y, rw, num, ttl, desc)
     return slide
+
+
+# =========================================================
+# 화면 단위 SB (고정 배치) — 2026-11 개발팀 요청 형식
+#   · 모든 장 같은 위치: 왼쪽 「Screen」 영역(캡처) · 오른쪽 「Description」 영역(설명)
+#   · 도식(흐름도 · 표) 없이 텍스트로. 다른 장 참조 없이 그 화면에 풀어 씀
+#   · 한 화면 = 한 SB. 전체 캡처를 맨 위부터 스크롤하듯 이어 자르고, 장마다 보이는 요소를 위에서 아래로 설명
+#   · 캡처에 없는 상태(재고 부족 · 0개 · 팝업 등)는 그 항목 바로 뒤에, 잘린 화면 아래 같은 배율로
+#   · 번호는 「영역 번호-순서」(예: 4-12)를 넘긴 순서대로 새로 매김 → 항목은 화면에 보이는 순서로 넘길 것
+# =========================================================
+import re as _re
+
+SCR_IMG_W = 17.6            # Screen 영역 폭(cm)
+SCR_TOP, SCR_BOT = 2.84, 18.6
+SCR_GAP = 0.45
+SCR_BAR_H = 0.62
+SCR_PAD = 0.45
+SCR_CM_PER_PX = 0.0265      # 캡처 1px ≈ 화면 1px 보다 크게 키우지 않음
+SCR_FONT = 9.0              # Description 글자 크기(모든 장 같음)
+SCR_SCROLL_PAD = 30         # 화면 캡처 아래 여유(px)
+
+_SCR_FONT_FILE = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts', 'malgun.ttf')
+_SCR_MF = None
+_SCR_CW = {}
+
+
+def _scr_cw(ch):
+    """글자 폭(em). 맑은 고딕 실제 폭, 폰트가 없으면 한글 0.92 · 그 외 0.5 근사"""
+    global _SCR_MF
+    if ch in _SCR_CW:
+        return _SCR_CW[ch]
+    if _SCR_MF is None:
+        try:
+            from PIL import ImageFont
+            _SCR_MF = ImageFont.truetype(_SCR_FONT_FILE, 100)
+        except Exception:
+            _SCR_MF = False
+    _SCR_CW[ch] = (_SCR_MF.getlength(ch) / 100) if _SCR_MF else (0.92 if ord(ch) >= 0x1100 else 0.5)
+    return _SCR_CW[ch]
+
+
+def wrap_lines_ko(seg, width_cm, size):
+    """PowerPoint와 같은 단어 단위 줄바꿈(글자에 ko-KR 지정 시). 한 단어가 한 줄보다 길 때만 글자 단위"""
+    em = size * 0.0353
+    lim = width_cm - 0.05
+    out, buf, cur = [], '', 0.0
+    for word in _re.split(r'(?<= )', seg):
+        ww = sum(_scr_cw(c) for c in word) * em
+        wt = sum(_scr_cw(c) for c in word.rstrip(' ')) * em
+        if buf and cur + wt > lim:
+            out.append(buf); buf, cur = '', 0.0
+        if not buf and wt > lim:
+            for c in word:
+                w = _scr_cw(c) * em
+                if cur + w > lim and buf:
+                    out.append(buf); buf, cur = '', 0.0
+                buf += c; cur += w
+            continue
+        buf += word; cur += ww
+    out.append(buf)
+    return out
+
+
+def no_orphan(line, width_cm, size):
+    """마지막 줄에 서너 글자(「음.」 · 「하나만.」 등)만 떨어지면 앞쪽 띄어쓰기에서 미리 줄을 바꿈"""
+    segs = []
+    for seg in str(line).split('\n'):
+        ls = wrap_lines_ko(seg, width_cm, size)
+        if len(ls) > 1 and len(ls[-1].strip()) <= 4:
+            cut = len(seg) - len(ls[-1])
+            for i in range(cut - 1, max(0, cut - 25), -1):
+                if seg[i] == ' ' and len(seg) - i - 1 >= 8:
+                    seg = seg[:i] + '\n' + seg[i + 1:]
+                    break
+        segs.append(seg)
+    return '\n'.join(segs)
+
+
+def text_h_ko(lines, width_cm, size=SCR_FONT, line_spacing=1.15):
+    """줄 수를 실제 글자 폭 · 단어 단위로 세어 높이(cm) 계산"""
+    if isinstance(lines, str):
+        lines = [lines]
+    n = sum(len(wrap_lines_ko(seg, width_cm, size)) for ln in lines for seg in no_orphan(ln, width_cm, size).split('\n'))
+    return n * size * 0.0353 * 1.2 * line_spacing + 0.05
+
+
+def split_sentences(lines):
+    """한 줄에 한 문장: 「」 · 괄호 안 마침표는 나누지 않음"""
+    out = []
+    for x in ([lines] if isinstance(lines, str) else lines):
+        buf, depth = '', 0
+        for i, c in enumerate(x):
+            buf += c
+            if c in '「(':
+                depth += 1
+            elif c in '」)' and depth:
+                depth -= 1
+            elif c == '.' and depth == 0 and (i + 1 == len(x) or x[i + 1] == ' ') and not (i > 0 and x[i - 1].isdigit() and i + 1 < len(x) and x[i + 1].isdigit()):
+                out.append(buf.strip()); buf = ''
+        if buf.strip():
+            out.append(buf.strip())
+    return out
+
+
+def _scr_paras(slide, l, t, w, h, lines, size=SCR_FONT, color=DESC_TEXT):
+    return add_paras(slide, l, t, w, h, [no_orphan(x, w, size) for x in lines], size=size, color=color)
+
+
+def scr_badge(slide, l, t, label, fill=BLUE):
+    """번호 배지. 두 글자까지 원, 「4-12」처럼 길면 알약 모양. 반환: 폭(cm)"""
+    label = str(label)
+    h = 0.48
+    w = h if len(label) <= 2 else 0.18 + 0.165 * len(label)
+    sh = slide.shapes.add_shape(MSO_SHAPE.OVAL if len(label) <= 2 else MSO_SHAPE.ROUNDED_RECTANGLE, Cm(l), Cm(t), Cm(w), Cm(h))
+    if len(label) > 2:
+        sh.adjustments[0] = 0.5
+    sh.fill.solid(); sh.fill.fore_color.rgb = fill
+    sh.line.color.rgb = fill; sh.line.width = Pt(1.0)
+    sh.shadow.inherit = False
+    tf = sh.text_frame
+    tf.word_wrap = False
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    p = tf.paragraphs[0]; p.alignment = PP_ALIGN.CENTER
+    r = p.add_run(); r.text = label
+    set_font(r, size=8.5 if len(label) <= 3 else 8, bold=True, color=WHITE)
+    return w
+
+
+def _badge_w(label):
+    return 0.48 if len(str(label)) <= 2 else 0.18 + 0.165 * len(str(label))
+
+
+def _place_badge(slide, label, bl, bt, bw, bh, mode, frame_l, frame_t):
+    """박스(bl, bt, bw, bh) 기준 번호 위치. 글자 · 버튼을 덮지 않게 박스 바깥 빈 쪽.
+    mode: left(기본: 박스 왼쪽, 키 큰 박스는 위 끝에 맞춤) · above · below · right · tr(오른쪽 위 모서리) · midleft · corner"""
+    w = _badge_w(label)
+    if mode in (None, 'auto', 'left'):
+        if bl - frame_l >= w + 0.1:
+            px, py = bl - w - 0.06, (bt + 0.02) if bh > 1.0 else (bt + bh / 2 - 0.24)
+        elif bt - frame_t >= 0.55:
+            px, py = bl, bt - 0.52
+        else:
+            px, py = bl - 0.24, bt - 0.24
+    elif mode == 'above':
+        px, py = bl, bt - 0.52
+    elif mode == 'below':
+        px, py = bl + bw / 2 - w / 2, bt + bh + 0.04
+    elif mode == 'right':
+        px, py = bl + bw + 0.06, bt + bh / 2 - 0.24
+    elif mode == 'tr':
+        px, py = bl + bw - w / 2, bt - 0.24
+    elif mode == 'midleft':
+        px, py = bl - w / 2, bt + bh / 2 - 0.24
+    else:
+        px, py = bl - 0.24, bt - 0.24
+    scr_badge(slide, max(PAGE_L + 0.05, px), max(frame_t - 0.3, py), label)
+
+
+def _scr_frame(slide, l, w, label):
+    add_rect(slide, l, SCR_TOP, w, SCR_BOT - SCR_TOP, fill=None, line_color=BORDER_GRAY, line_w_pt=0.75)
+    add_rect(slide, l, SCR_TOP, w, SCR_BAR_H, fill=BADGE_BG, line_color=BORDER_GRAY, line_w_pt=0.75)
+    add_textbox(slide, l + 0.3, SCR_TOP + 0.1, w - 0.6, SCR_BAR_H - 0.15, label, size=10, bold=True, color=BLUE_DARK)
+
+
+def _quiet_rows(img):
+    """가로 한 줄에서 배경과 다른 점이 몇 개뿐(카드 세로 테두리 정도)이면 빈 줄"""
+    try:
+        import numpy as np
+        g = np.asarray(img.convert('L'), dtype=np.int16)
+        med = np.median(g, axis=1, keepdims=True)
+        return list((np.abs(g - med) > 10).sum(axis=1) <= max(8, g.shape[1] // 150))
+    except ImportError:
+        g = img.convert('L'); W, H = g.size; px = g.load(); out = []
+        for y in range(H):
+            row = sorted(px[x, y] for x in range(0, W, 2)); med = row[len(row) // 2]
+            out.append(sum(1 for v in row if abs(v - med) > 10) <= max(4, W // 300))
+        return out
+
+
+def _quiet_cut(q, y, lo, hi, prefer_up=False):
+    """y 근처에서 앞뒤 5줄이 비어 있는 줄로 자르는 위치를 옮김(글자 · 카드 중간을 자르지 않게)"""
+    lo, hi = max(0, int(lo)), min(len(q) - 1, int(hi))
+    cand = [r for r in range(lo, hi + 1) if all(q[k] for k in range(max(0, r - 2), min(len(q), r + 3)))]
+    if not cand:
+        return y
+    if prefer_up:
+        up = [r for r in cand if r <= y]
+        return max(up) if up else y
+    return min(cand, key=lambda r: abs(r - y))
+
+
+def _shot_size(sp):
+    with Image.open(sp['file']) as im:
+        pw, ph = im.size
+    d = sp.get('dpr', 1)            # 2배 해상도 캡처(현행 사이트 등)는 화면 px로 환산해 같은 배율
+    return pw / d, ph / d
+
+
+def _shot_rows(shots, sc, IW, IH):
+    """한 열로 쌓되, 화면 칸 폭의 절반보다 좁은 캡처가 이어지면(같은 요소의 상태) 같은 배율로 옆에 붙임"""
+    rows = []
+    for sp in shots:
+        pw, ph = _shot_size(sp)
+        w = min(IW, pw * sc, IH * pw / ph)
+        h = w * ph / pw
+        narrow = w < IW / 2
+        if rows and narrow and rows[-1]['narrow'] and rows[-1]['w'] + 0.5 + w <= IW:
+            rows[-1]['items'].append((sp, w, h)); rows[-1]['w'] += 0.5 + w; rows[-1]['h'] = max(rows[-1]['h'], h)
+        else:
+            rows.append(dict(items=[(sp, w, h)], w=w, h=h, narrow=narrow))
+    return rows
+
+
+def _shots_h(shots, sc, IW, IH):
+    rows = _shot_rows(shots, sc, IW, IH)
+    return sum(r['h'] for r in rows) + 0.5 * max(0, len(rows) - 1)
+
+
+def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=None, ref_px=None, work_dir=None):
+    """
+    화면 하나를 고정 배치(Screen · Description)로 여러 장에 이어 그린다.
+
+    full: 전체 화면 캡처 {'file': 경로, 'dpr': 1} (선택). 화면 맨 위부터 장마다 이어서 잘라 보여 줌.
+          헤더처럼 한 줄짜리 화면도 그 캡처를 full로 넘기면 됨.
+    summary: 화면 공통 요약 [문장, ...] — 첫 장 Description 맨 위 요약 박스.
+    areas: [{'title': '재주문 체크' | None, 'summary': [...], 'items': [item, ...]}, ...]
+      item = {
+        'title': '수량', 'desc': ['문장.', ...],       # 화면 문구는 「」로 그대로 인용
+        'box': (x, y, w, h),                          # full 캡처 px 기준 박스(그 요소가 전체 캡처에 보일 때)
+        'badge': 'left' | 'above' | 'below' | 'right' | 'tr' | 'midleft' | 'corner',
+        'shots': [{'file': 경로, 'boxes': [(x, y, w, h), ...], 'badge': 'left'|'above'|'right', 'anchor': 0, 'dpr': 1}],
+                                                      # 캡처에 없는 상태 화면. boxes가 없으면 캡처 전체가 그 상태(번호는 모서리)
+        'new_page': True,                             # 다른 덩어리(구매 패널 등)가 시작하는 항목: 새 장에서
+        'key': 'price_hide',                          # 다른 항목 설명에서 [[price_hide]]로 번호를 가리킬 때
+      }
+      · box도 shots도 없는 항목은 번호 없이 그 영역 요약 박스에 「제목: 설명」으로 들어감(가리킬 곳이 없으므로)
+      · 번호: 제목 있는 영역이 있으면 「영역 순번-항목 순번」, 없으면 1부터. 넘긴 순서 = 번호 순서 = 화면에 보이는 순서
+      · 한 영역 · 한 덩어리는 끝까지 이어서 넘길 것(중간에 다른 덩어리를 끼우지 않음)
+    ref_px: 상태 캡처 배율 기준 폭(px). 기본 = full 캡처 폭(없으면 1240)
+    work_dir: 잘라 낸 캡처 저장 폴더(기본: full 캡처 옆 _crops)
+    반환: {key 또는 제목: 번호}
+    """
+    IL, IT = PAGE_L + SCR_PAD, SCR_TOP + SCR_BAR_H + SCR_PAD
+    IW, IH = SCR_IMG_W - 2 * SCR_PAD, SCR_BOT - SCR_TOP - SCR_BAR_H - 2 * SCR_PAD
+    D_L = PAGE_L + SCR_IMG_W + SCR_GAP
+    D_W = PAGE_L + PAGE_W - D_L
+    DX, DW = D_L + SCR_PAD, D_W - 2 * SCR_PAD
+    DY0, DYMAX = SCR_TOP + SCR_BAR_H + 0.35, SCR_BOT - 0.3
+    size = SCR_FONT
+    src = q = None
+    W = H = 0
+    if full:
+        src = Image.open(full['file'])
+        W, H = src.size
+        d = full.get('dpr', 1)
+        if d != 1:
+            src = src.resize((int(W / d), int(H / d)))
+            W, H = src.size
+        q = _quiet_rows(src)
+        work_dir = work_dir or os.path.join(os.path.dirname(os.path.abspath(full['file'])), '_crops')
+        os.makedirs(work_dir, exist_ok=True)
+    ref = ref_px or (W if full else 1240)
+    sc = min(IW / ref, SCR_CM_PER_PX)
+
+    # 1) 번호 매기기 · 가리킬 곳 없는 항목은 영역 요약으로
+    titled = any(a.get('title') for a in areas)
+    labels, secs, an = {}, [], 0
+    for a in areas:
+        if a.get('title'):
+            an += 1
+        part = f"{an} {a['title']}" if a.get('title') else None
+        s_ = list(a.get('summary') or [])
+        its, k = [], 0
+        for it in a.get('items', []):
+            if not it.get('box') and not it.get('shots'):
+                s_.append(f"{it['title']}: " + '. '.join(x.rstrip('.') for x in split_sentences(it.get('desc', []))))
+                continue
+            k += 1
+            lab = f'{an}-{k}' if titled else str(len(labels) + 1)
+            if it.get('key'):
+                labels[it['key']] = lab
+            else:
+                labels.setdefault(it['title'], lab)   # 같은 제목이 여러 번이면 첫 번째. 정확히 가리키려면 key
+            its.append(dict(it, label=lab))
+        secs.append(dict(part=part, summary=s_, items=its))
+
+    def fill(txt):
+        return _re.sub(r'\[\[([^\]]+)\]\]', lambda m: labels.get(m.group(1), m.group(0)), txt)
+
+    # 2) 블록: H(영역 제목 + 요약) · I(항목)
+    blocks = []
+    if summary:
+        blocks.append(dict(kind='H', part=None, summary=list(summary)))
+    for s_ in secs:
+        if s_['part'] or s_['summary']:
+            blocks.append(dict(kind='H', part=s_['part'], summary=s_['summary']))
+        for it in s_['items']:
+            blocks.append(dict(kind='I', it=it, desc=[fill(x) for x in split_sentences(it.get('desc', []))]))
+
+    def sum_h(lines):
+        return text_h_ko(['• ' + b for b in lines], DW - 0.5, size) + 0.5
+
+    def bh(b):
+        if b['kind'] == 'H':
+            return (0.62 if b['part'] else 0) + (sum_h(b['summary']) + 0.35 if b['summary'] else (0.25 if b['part'] else 0))
+        return 0.58 + (text_h_ko(b['desc'], DW, size) if b['desc'] else 0) + 0.3
+
+    def win_need(page, first):
+        bx = [b['it']['box'] for b in page if b['kind'] == 'I' and b['it'].get('box')]
+        h = 0.0
+        if bx and full:
+            y0 = 0 if first else max(0, min(r[1] for r in bx) - 60)
+            y1 = max(r[1] + r[3] for r in bx) + SCR_SCROLL_PAD
+            h += (y1 - y0) * sc + 0.6
+        shots = [sp for b in page if b['kind'] == 'I' for sp in b['it'].get('shots', [])]
+        if shots:
+            h += _shots_h(shots, sc, IW, IH)
+        return h
+
+    # 3) 장 나누기: 설명 높이 · 화면 높이 · 새 덩어리 · 상태 캡처 뒤에 다시 화면 박스가 오면 새 장(번호가 거꾸로 보이지 않게)
+    pages, cur, used, k = [], [], 0.0, 0
+    while k < len(blocks):
+        b = blocks[k]
+        pair = [b] + ([blocks[k + 1]] if b['kind'] == 'H' and k + 1 < len(blocks) else [])
+        need = sum(bh(x) for x in pair)
+        trial = cur + pair
+        brk = False
+        if cur:
+            nb = next((x for x in pair if x['kind'] == 'I'), None)
+            if cur[-1]['kind'] == 'H':   # 방금 영역 제목만 놓였으면 그 영역 첫 항목은 같은 장에(제목만 남는 장 방지)
+                nb = None
+            had_shot = any(x['kind'] == 'I' and x['it'].get('shots') for x in cur)
+            brk = (used + need > DYMAX - DY0 or win_need(trial, not pages) > IH
+                   or (nb is not None and nb['it'].get('new_page'))
+                   or (nb is not None and nb['it'].get('box') and had_shot))
+        if brk:
+            pages.append(cur); cur, used = [], 0.0
+            continue
+        cur.append(b); used += bh(b); k += 1
+    if cur:
+        pages.append(cur)
+
+    # 4) 그리기
+    for pi, page in enumerate(pages):
+        s = new_slide(prs)
+        add_header(s, sb_id, title, status_text)
+        _scr_frame(s, PAGE_L, SCR_IMG_W, 'Screen')
+        _scr_frame(s, D_L, D_W, 'Description')
+        top = IT
+        bxs = [b for b in page if b['kind'] == 'I' and b['it'].get('box')]
+        shots = []
+        for b in page:
+            if b['kind'] == 'I':
+                for sp in b['it'].get('shots', []):
+                    shots.append(dict(sp, label=b['it']['label']))
+        if bxs and full:
+            ys = [b['it']['box'][1] for b in bxs]
+            room = IH - ((_shots_h(shots, sc, IW, IH) + 0.6) if shots else 0)
+            win = room / sc
+            y0 = 0 if pi == 0 else max(0, min(ys) - 60)
+            y1 = y0 + win
+            if y1 > H:
+                y1, y0 = H, max(0, H - win)
+            need_end = max(b['it']['box'][1] + b['it']['box'][3] for b in bxs) + SCR_SCROLL_PAD
+            y1 = max(y1, min(H, need_end))
+            if pi != 0:
+                y0 = _quiet_cut(q, int(y0), int(y0) - 70, min(ys) - 6)
+            y1 = min(y1, max(int(need_end), int(y0 + win)))
+            if y1 < H:
+                y1 = _quiet_cut(q, int(y1), max(int(need_end), int(y1) - 80), int(y1), prefer_up=True)
+            y0, y1 = int(y0), int(min(H, y1))
+            fn = os.path.join(work_dir, f"{os.path.splitext(os.path.basename(full['file']))[0]}_{y0}_{y1}.png")
+            src.crop((0, y0, W, y1)).save(fn)
+            w, h = W * sc, (y1 - y0) * sc
+            s.shapes.add_picture(fn, Cm(IL), Cm(IT), Cm(w), Cm(h))
+            add_rect(s, IL, IT, w, h, fill=None, line_color=BORDER_GRAY, line_w_pt=0.75)
+            for b in bxs:
+                rx, ry, rw, rh = b['it']['box']
+                rh2 = min(rh, y1 - ry)
+                bl, bt = IL + max(0, rx) * sc, IT + (ry - y0) * sc
+                bw = min(rw, W - max(0, rx)) * sc
+                add_rect(s, bl, bt, bw, rh2 * sc, fill=None, line_color=BLUE, line_w_pt=1.5)
+            for b in bxs:     # 박스를 다 그린 뒤 번호(가림 방지)
+                rx, ry, rw, rh = b['it']['box']
+                rh2 = min(rh, y1 - ry)
+                _place_badge(s, b['it']['label'], IL + max(0, rx) * sc, IT + (ry - y0) * sc,
+                             min(rw, W - max(0, rx)) * sc, rh2 * sc, b['it'].get('badge'), IL, IT)
+            top = IT + h + 0.6
+        if shots:
+            y = top
+            for row in _shot_rows(shots, sc, IW, IH):
+                x = IL
+                for sp, w, h in row['items']:
+                    s.shapes.add_picture(sp['file'], Cm(x), Cm(y), Cm(w), Cm(h))
+                    add_rect(s, x, y, w, h, fill=None, line_color=BORDER_GRAY, line_w_pt=0.75)
+                    k_ = w / _shot_size(sp)[0]
+                    bxl = sp.get('boxes') or []
+                    for bx_, by_, bw_, bh_ in bxl:
+                        add_rect(s, x + bx_ * k_, y + by_ * k_, bw_ * k_, bh_ * k_, fill=None, line_color=BLUE, line_w_pt=1.5)
+                    if bxl:
+                        a = bxl[sp.get('anchor', 0)]
+                        _place_badge(s, sp['label'], x + a[0] * k_, y + a[1] * k_, a[2] * k_, a[3] * k_, sp.get('badge'), x, y)
+                    else:   # 캡처 전체가 그 상태
+                        scr_badge(s, x - 0.24, y - 0.24, sp['label'])
+                    x += w + 0.5
+                y += row['h'] + 0.5
+            if y - 0.5 > IT + IH + 0.05:
+                print(f'  !! {sb_id} {pi + 1}장 Screen 넘침 {y - 0.5 - IT:.1f}/{IH:.1f}cm')
+        y = DY0
+        for b in page:
+            if b['kind'] == 'H':
+                if b['part']:
+                    add_textbox(s, DX, y, DW, 0.5, b['part'], size=11, bold=True, color=BLUE_DARK)
+                    add_rect(s, DX, y + 0.5, DW, 0.02, fill=BLUE, line_color=None)
+                    y += 0.62
+                if b['summary']:
+                    shh = sum_h(b['summary'])
+                    add_rect(s, DX, y, DW, shh, fill=SUMMARY_BG, line_color=SUMMARY_BORDER, line_w_pt=0.75)
+                    _scr_paras(s, DX + 0.25, y + 0.2, DW - 0.5, shh - 0.4, ['• ' + t for t in b['summary']], size=size, color=BODY_TEXT)
+                    y += shh + 0.35
+                elif b['part']:
+                    y += 0.25
+            else:
+                bw = scr_badge(s, DX, y, b['it']['label'])
+                add_textbox(s, DX + bw + 0.18, y, DW - bw - 0.18, 0.5, b['it']['title'], size=10.5, bold=True, color=BLUE_DARK)
+                th = text_h_ko(b['desc'], DW, size) if b['desc'] else 0
+                if b['desc']:
+                    _scr_paras(s, DX, y + 0.58, DW, th, b['desc'], size=size)
+                y += 0.58 + th + 0.3
+        if y - 0.3 > DYMAX + 0.05:
+            print(f'  !! {sb_id} {pi + 1}장 Description 넘침 {y:.1f}cm')
+    return labels
+
+
+def finish_presentation(prs):
+    """저장 직전에 호출: 모든 글자를 한국어(ko-KR)로 지정해 PowerPoint가 단어 단위로 줄을 바꾸게 하고(지정이 없으면
+    한글을 글자 단위로 끊어 「오/더」처럼 단어가 쪼개짐 · eaLnBrk 속성으로는 안 바뀜), 쉼표 · 마침표가 줄 첫머리로 가지 않게 함"""
+    for sl in prs.slides:
+        for p in sl.shapes._spTree.iter(qn('a:p')):
+            ppr = p.find(qn('a:pPr'))
+            if ppr is None:
+                ppr = p.makeelement(qn('a:pPr'), {})
+                p.insert(0, ppr)
+            ppr.set('hangingPunct', '1')
+            for r in p.iter(qn('a:r'), qn('a:fld')):
+                rpr = r.find(qn('a:rPr'))
+                if rpr is None:
+                    rpr = r.makeelement(qn('a:rPr'), {})
+                    r.insert(0, rpr)
+                rpr.set('lang', 'ko-KR'); rpr.set('altLang', 'en-US')
+
+
+def audit_sb(pptx_path, verbose=True):
+    """
+    완성된 SB 전 장 기계 검사. 반환: [(장 번호, 문제), ...]
+      · Screen 번호 ↔ Description 번호 양쪽 일치(설명만 있거나 화면에만 있는 번호)
+      · 화면 번호가 보이는 순서(이미지 위→아래, 이미지 안 위→아래 · 같은 줄 왼→오른)대로 오르는지
+        (같은 요소의 상태 캡처로 번호가 다시 나오는 것은 허용. 같은 줄 나란한 번호는 「확인」으로만 표시)
+    렌더 눈 확인(render_slides_to_png)과 함께 쓴다.
+    """
+    prs = Presentation(pptx_path)
+    split = Cm(PAGE_L + SCR_IMG_W + SCR_GAP / 2)
+    lab_re = _re.compile(r'^\d+(-\d+)?$')
+    key = lambda l: tuple(int(x) for x in l.split('-'))
+    out = []
+    for i, sl in enumerate(prs.slides, 1):
+        imgs, L, R = [], [], set()
+        for sh in sl.shapes:
+            if sh.shape_type == 13 and sh.left < split:
+                imgs.append((sh.left / 360000, sh.top / 360000, sh.width / 360000, sh.height / 360000))
+            elif sh.has_text_frame and lab_re.match(sh.text_frame.text.strip()) and sh.width < Cm(1.6):
+                t = sh.text_frame.text.strip()
+                (L.append((t, sh.left / 360000 + 0.24, sh.top / 360000 + 0.24)) if sh.left < split else R.add(t))
+        if not imgs or not (L or R):
+            continue
+        Ls = {t for t, _, _ in L}
+        if R - Ls:
+            out.append((i, f'설명만 있고 화면 번호 없음 {sorted(R - Ls, key=key)}'))
+        if Ls - R:
+            out.append((i, f'화면 번호만 있고 설명 없음 {sorted(Ls - R, key=key)}'))
+
+        def owner(x, y):
+            return min(range(len(imgs)), key=lambda k: max(imgs[k][0] - x, 0, x - imgs[k][0] - imgs[k][2])
+                       + max(imgs[k][1] - y, 0, y - imgs[k][1] - imgs[k][3]))
+        order = sorted(range(len(imgs)), key=lambda k: (round(imgs[k][1] / 0.3), imgs[k][0]))
+        rank = {k: r for r, k in enumerate(order)}
+        ent = sorted(((rank[owner(x, y)], y, x, t) for t, x, y in L), key=lambda e: (e[0], e[1]))
+        rows = []
+        for e in ent:
+            if rows and rows[-1][0][0] == e[0] and abs(e[1] - rows[-1][0][1]) <= 0.45:
+                rows[-1].append(e)
+            else:
+                rows.append([e])
+        seq = [e[3] for r in rows for e in sorted(r, key=lambda e: e[2])]
+        seq = [x for k, x in enumerate(seq) if k == 0 or x != seq[k - 1]]
+        seen = set()
+        for a, b in zip(seq, seq[1:]):
+            if key(b) < key(a) and b not in seen:
+                same_row = any(a in [e[3] for e in r] and b in [e[3] for e in r] for r in rows)
+                out.append((i, f"{'확인(같은 줄)' if same_row else '번호 거꾸로'} {a} 다음에 {b}"))
+            seen.add(a)
+    if verbose:
+        for i, m in out:
+            print(f'  {i}장: {m}')
+        print(f'audit_sb: {len(out)}건')
+    return out
 
 
 # =========================================================
