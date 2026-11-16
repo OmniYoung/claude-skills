@@ -802,6 +802,37 @@ def _scr_paras(slide, l, t, w, h, lines, size=SCR_FONT, color=DESC_TEXT):
     return add_paras(slide, l, t, w, h, [no_orphan(x, w, size) for x in lines], size=size, color=color)
 
 
+SCR_BUL_IND = 0.25   # 설명 불릿 내어쓰기(cm)
+
+
+def scr_desc_h(lines, w, size=SCR_FONT):
+    """항목 설명 높이. 문장이 둘 이상이면 불릿 + 내어쓰기 폭 기준"""
+    if not lines:
+        return 0
+    return text_h_ko(lines, w - SCR_BUL_IND, size) if len(lines) > 1 else text_h_ko(lines, w, size)
+
+
+def scr_desc(slide, l, t, w, h, lines, size=SCR_FONT, color=DESC_TEXT):
+    """항목 설명: 한 문장이면 그대로, 둘 이상이면 문장마다 앞에 불릿(넘어가는 줄은 글자 위치에 맞춰 내어쓰기)"""
+    if len(lines) <= 1:
+        return _scr_paras(slide, l, t, w, h, lines, size=size, color=color)
+    tb = slide.shapes.add_textbox(Cm(l), Cm(t), Cm(w), Cm(h))
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    for i, ln in enumerate(lines):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.line_spacing = 1.15
+        _set_bullet(p, indent_cm=SCR_BUL_IND)
+        for j, seg in enumerate(no_orphan(ln, w - SCR_BUL_IND, size).split('\n')):
+            if j:
+                p.add_line_break()   # 끝 글자 줄바꿈 방지 줄은 같은 문단(불릿 없이)
+            r = p.add_run()
+            r.text = seg
+            set_font(r, size=size, color=color)
+    return tb
+
+
 def scr_badge(slide, l, t, label, fill=BLUE):
     """번호 배지. 두 글자까지 원, 「4-12」처럼 길면 알약 모양. 반환: 폭(cm)"""
     label = str(label)
@@ -992,7 +1023,7 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
         if s_['part'] or s_['summary']:
             blocks.append(dict(kind='H', part=s_['part'], summary=s_['summary']))
         for it in s_['items']:
-            blocks.append(dict(kind='I', it=it, desc=[fill(x) for x in split_sentences(it.get('desc', []))]))
+            blocks.append(dict(kind='I', it=it, desc=[fill(y) for x in split_sentences(it.get('desc', [])) for y in x.split('\n') if y.strip()]))
 
     def sum_h(lines):
         return text_h_ko(['• ' + b for b in lines], DW - 0.5, size) + 0.5
@@ -1000,7 +1031,7 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
     def bh(b):
         if b['kind'] == 'H':
             return (0.62 if b['part'] else 0) + (sum_h(b['summary']) + 0.35 if b['summary'] else (0.25 if b['part'] else 0))
-        return 0.58 + (text_h_ko(b['desc'], DW, size) if b['desc'] else 0) + 0.3
+        return 0.58 + scr_desc_h(b['desc'], DW, size) + 0.3
 
     def win_need(page, first):
         bx = [b['it']['box'] for b in page if b['kind'] == 'I' and b['it'].get('box')]
@@ -1120,9 +1151,9 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
             else:
                 bw = scr_badge(s, DX, y, b['it']['label'])
                 add_textbox(s, DX + bw + 0.18, y, DW - bw - 0.18, 0.5, b['it']['title'], size=10.5, bold=True, color=BLUE_DARK)
-                th = text_h_ko(b['desc'], DW, size) if b['desc'] else 0
+                th = scr_desc_h(b['desc'], DW, size)
                 if b['desc']:
-                    _scr_paras(s, DX, y + 0.58, DW, th, b['desc'], size=size)
+                    scr_desc(s, DX, y + 0.58, DW, th, b['desc'], size=size)
                 y += 0.58 + th + 0.3
         if y - 0.3 > DYMAX + 0.05:
             print(f'  !! {sb_id} {pi + 1}장 Description 넘침 {y:.1f}cm')
