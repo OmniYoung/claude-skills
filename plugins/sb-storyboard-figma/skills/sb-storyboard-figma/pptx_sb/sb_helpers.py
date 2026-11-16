@@ -803,28 +803,50 @@ def _scr_paras(slide, l, t, w, h, lines, size=SCR_FONT, color=DESC_TEXT):
 
 
 SCR_BUL_IND = 0.25   # 설명 불릿 내어쓰기(cm)
+SCR_SUB_IND = 0.35   # 2단계: 1단계 글자 위치에서 더 들어감
+# 단계별 (글자 시작, 불릿, 불릿~글자 간격). 2단계 대시는 1단계 글자 시작선 근처에
+SCR_LV = {1: (SCR_BUL_IND, '•', SCR_BUL_IND), 2: (SCR_BUL_IND + SCR_SUB_IND, '–', 0.32)}
+
+
+def scr_levels(lines):
+    """설명 줄 → [(단계, 문장)]. 「- 」로 시작하는 줄은 2단계(바로 위 1단계 문장을 풀어 쓴 문장)"""
+    out = []
+    for x in lines:
+        if isinstance(x, tuple):
+            out.append(x)
+        elif x.startswith('- '):
+            out.append((2 if out else 1, x[2:]))
+        else:
+            out.append((1, x))
+    return out
 
 
 def scr_desc_h(lines, w, size=SCR_FONT):
-    """항목 설명 높이. 문장이 둘 이상이면 불릿 + 내어쓰기 폭 기준"""
+    """항목 설명 높이. 문장이 둘 이상이면 단계별 불릿 + 내어쓰기 폭 기준"""
+    lines = scr_levels(lines)
     if not lines:
         return 0
-    return text_h_ko(lines, w - SCR_BUL_IND, size) if len(lines) > 1 else text_h_ko(lines, w, size)
+    if len(lines) == 1:
+        return text_h_ko([lines[0][1]], w, size)
+    return sum(text_h_ko([x], w - SCR_LV[lv][0], size) - 0.05 for lv, x in lines) + 0.05
 
 
 def scr_desc(slide, l, t, w, h, lines, size=SCR_FONT, color=DESC_TEXT):
-    """항목 설명: 한 문장이면 그대로, 둘 이상이면 문장마다 앞에 불릿(넘어가는 줄은 글자 위치에 맞춰 내어쓰기)"""
+    """항목 설명: 한 문장이면 그대로, 둘 이상이면 문장마다 앞에 불릿(1단계 •, 2단계 – 더 들여씀). 넘어가는 줄은 글자 위치에 맞춤"""
+    lines = scr_levels(lines)
     if len(lines) <= 1:
-        return _scr_paras(slide, l, t, w, h, lines, size=size, color=color)
+        return _scr_paras(slide, l, t, w, h, [x for _, x in lines], size=size, color=color)
     tb = slide.shapes.add_textbox(Cm(l), Cm(t), Cm(w), Cm(h))
     tf = tb.text_frame
     tf.word_wrap = True
     tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
-    for i, ln in enumerate(lines):
+    for i, (lv, ln) in enumerate(lines):
+        ind, ch, hang = SCR_LV[lv]
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         p.line_spacing = 1.15
-        _set_bullet(p, indent_cm=SCR_BUL_IND)
-        for j, seg in enumerate(no_orphan(ln, w - SCR_BUL_IND, size).split('\n')):
+        _set_bullet(p, char=ch, indent_cm=hang)
+        p._p.get_or_add_pPr().set('marL', str(Cm(ind)))
+        for j, seg in enumerate(no_orphan(ln, w - ind, size).split('\n')):
             if j:
                 p.add_line_break()   # 끝 글자 줄바꿈 방지 줄은 같은 문단(불릿 없이)
             r = p.add_run()
@@ -1023,7 +1045,9 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
         if s_['part'] or s_['summary']:
             blocks.append(dict(kind='H', part=s_['part'], summary=s_['summary']))
         for it in s_['items']:
-            blocks.append(dict(kind='I', it=it, desc=[fill(y) for x in split_sentences(it.get('desc', [])) for y in x.split('\n') if y.strip()]))
+            blocks.append(dict(kind='I', it=it, desc=[('- ' if x.startswith('- ') and not y.startswith('- ') else '') + fill(y)
+                                                      for x in ([it['desc']] if isinstance(it.get('desc'), str) else it.get('desc', []))
+                                                      for z in split_sentences(x) for y in z.split('\n') if y.strip()]))
 
     def sum_h(lines):
         return text_h_ko(['• ' + b for b in lines], DW - 0.5, size) + 0.5
