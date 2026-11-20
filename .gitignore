@@ -6,3 +6,7 @@ auth.json
 cookies.txt
 cookies.json
 output/
+
+# 스킬 점검용 임시 산출물
+/smoke.pptx
+/smoke_png/
