@@ -981,6 +981,7 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
         'shots': [{'file': 경로, 'boxes': [(x, y, w, h), ...], 'badge': 'left'|'above'|'right', 'anchor': 0, 'dpr': 1}],
                                                       # 캡처에 없는 상태 화면. boxes가 없으면 캡처 전체가 그 상태(번호는 모서리)
         'new_page': True,                             # 다른 덩어리(구매 패널 등)가 시작하는 항목: 새 장에서
+        'keep_page': True,                            # 앞 항목의 상태 캡처 뒤라도 자리가 남으면 같은 장에(기본은 새 장 — 번호가 위→아래로 오르게)
         'key': 'price_hide',                          # 다른 항목 설명에서 [[price_hide]]로 번호를 가리킬 때
       }
       · box도 shots도 없는 항목은 번호 없이 그 영역 요약 박스에 「제목: 설명」으로 들어감(가리킬 곳이 없으므로)
@@ -1084,7 +1085,7 @@ def build_screen_sb(prs, sb_id, title, status_text, areas, full=None, summary=No
             had_shot = any(x['kind'] == 'I' and x['it'].get('shots') for x in cur)
             brk = (used + need > DYMAX - DY0 or win_need(trial, not pages) > IH
                    or (nb is not None and nb['it'].get('new_page'))
-                   or (nb is not None and nb['it'].get('box') and had_shot))
+                   or (nb is not None and nb['it'].get('box') and had_shot and not nb['it'].get('keep_page')))
         if brk:
             pages.append(cur); cur, used = [], 0.0
             continue
