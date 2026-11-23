@@ -985,8 +985,9 @@ def do_login(urls, ws, done_text=None):
             ctx_args["storage_state"] = str(auth)
         ctx = browser.new_context(**ctx_args)
         page = ctx.new_page()
-        page.goto(urls[0], wait_until="domcontentloaded", timeout=120000)
+        # UA는 이동 전에 읽는다 (첫 주소가 로그인 페이지로 리다이렉트되면 evaluate 가 컨텍스트 파기로 죽음)
         ua = page.evaluate("navigator.userAgent")
+        page.goto(urls[0], wait_until="domcontentloaded", timeout=120000)
 
         idx, streak, start = 0, 0, time.time()
         try:
