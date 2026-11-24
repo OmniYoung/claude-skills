@@ -5,6 +5,17 @@
     "qa_prefix": "[QA]20260911",
     "sources": [
       "러너 자체 검증용 - 실제 기획 근거 없음"
+    ],
+    "residue_check": [
+      {
+        "action": "goto",
+        "url": "_smoke.html"
+      },
+      {
+        "action": "expect_text",
+        "selector": "#title",
+        "not_contains": "{QA_PREFIX}"
+      }
     ]
   },
   "blocklist": [
@@ -37,6 +48,9 @@
           "action": "screenshot",
           "name": "목록"
         }
+      ],
+      "req": [
+        "REQ-01"
       ]
     },
     {
@@ -56,7 +70,13 @@
           "selector": "#title",
           "contains": "있을리없는문구"
         }
-      ]
+      ],
+      "req": [
+        "REQ-02"
+      ],
+      "severity": "치명",
+      "area": "공통",
+      "fix": "제목 문구 오류: '샘플 상세관리' 노출 중 (SB: '있을리없는문구')"
     },
     {
       "id": "TC-003",
@@ -209,6 +229,194 @@
           "selector": "#use-n"
         }
       ]
+    },
+    {
+      "id": "TC-008",
+      "title": "셀렉터 없음 (ERROR 경로 검증)",
+      "requirement": "없는 요소를 기다리다 시간 초과 -> 점검 필요",
+      "source": "스모크",
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "expect_text",
+          "selector": "#nope",
+          "contains": "x",
+          "timeout": 1000
+        }
+      ]
+    },
+    {
+      "id": "TC-009",
+      "title": "전제 데이터 없음 (NA 경로 검증)",
+      "requirement": "precondition 불충족 -> 조건 미충족",
+      "source": "스모크",
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "expect_count",
+          "selector": "tr.row-25692",
+          "count": 1,
+          "precondition": true
+        },
+        {
+          "action": "expect_visible",
+          "selector": "tr.row-25692"
+        }
+      ]
+    },
+    {
+      "id": "TC-010",
+      "title": "soft 검증 여러 개 (모두 확인 후 실패)",
+      "requirement": "첫 불일치에서 멈추지 않고 나머지도 확인",
+      "source": "스모크",
+      "req": [
+        "REQ-02"
+      ],
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "expect_text",
+          "selector": "#title",
+          "contains": "틀린문구1",
+          "soft": true
+        },
+        {
+          "action": "expect_count",
+          "selector": "button.detail",
+          "count": 3,
+          "soft": true
+        },
+        {
+          "action": "expect_text",
+          "selector": "#title",
+          "contains": "틀린문구2",
+          "soft": true
+        }
+      ]
+    },
+    {
+      "id": "TC-011",
+      "title": "크기·위치 통과 (expect_box)",
+      "requirement": "배너 500x100, 채팅은 배너 아래 10px 왼쪽 정렬",
+      "source": "스모크",
+      "req": [
+        "REQ-05"
+      ],
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "expect_box",
+          "selector": "#banner",
+          "width": 500,
+          "height": 100
+        },
+        {
+          "action": "expect_box",
+          "selector": "#chat",
+          "below": "#banner",
+          "gap": {
+            "min": 0,
+            "max": 12
+          },
+          "align": "left"
+        }
+      ]
+    },
+    {
+      "id": "TC-012",
+      "title": "크기·위치 실패 (expect_box)",
+      "requirement": "채팅이 배너 오른쪽에 있어야 함 (일부러 실패)",
+      "source": "스모크",
+      "req": [
+        "REQ-05"
+      ],
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "expect_box",
+          "selector": "#chat",
+          "right_of": "#banner",
+          "width": {
+            "min": 300
+          }
+        }
+      ]
+    },
+    {
+      "id": "TC-013",
+      "title": "콘솔 오류 수집 (판정은 통과)",
+      "requirement": "JS 오류는 참고 정보로만 남음",
+      "source": "스모크",
+      "writes": false,
+      "approved": false,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "_smoke.html"
+        },
+        {
+          "action": "click",
+          "selector": "#boom",
+          "write": false
+        },
+        {
+          "action": "expect_visible",
+          "selector": "#boom"
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-01",
+      "text": "조건을 만족하는 행에만 상세관리 버튼 노출",
+      "source": "스모크"
+    },
+    {
+      "id": "REQ-02",
+      "text": "제목 문구",
+      "source": "스모크"
+    },
+    {
+      "id": "REQ-03",
+      "text": "케이스를 만들지 않은 요건 (미검증 표시 확인용)",
+      "source": "스모크"
+    },
+    {
+      "id": "REQ-04",
+      "text": "이번 범위 아님",
+      "source": "스모크",
+      "exclude": "화면 밖 배치 작업"
+    },
+    {
+      "id": "REQ-05",
+      "text": "채팅 영역은 배너 바로 아래 왼쪽 정렬",
+      "source": "스모크"
     }
   ]
 }

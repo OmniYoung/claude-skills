@@ -10,10 +10,35 @@
 ```json
 {
   "meta": { ... },
+  "requirements": [ ... ],
   "blocklist": [ ... ],
   "cases": [ ... ]
 }
 ```
+
+### requirements · 요건 커버리지
+
+1단계에서 뽑은 기획 요건 목록. 케이스의 `req` 와 이어져 리포트 맨 위에 "요건 커버리지" 표가 생긴다.
+케이스 → 근거 방향만으로는 **케이스가 안 만들어진 요건**이 보이지 않기 때문에 요건 → 케이스 방향으로 본다.
+
+```json
+"requirements": [
+  { "id": "REQ-01", "text": "임박재고 칩 건수에 긴급재고 포함", "source": "SB v1.4 > 3p" },
+  { "id": "REQ-02", "text": "엑셀 양식 통일", "source": "기획_내용.md > 공통",
+    "exclude": "통일 기준 정의 없음 - 기획 확정 후 추가" }
+]
+```
+
+| 키 | 필수 | 설명 |
+|---|---|---|
+| `id` | O | `REQ-01` 형식 |
+| `text` | O | 요건 원문 (짧게) |
+| `source` | - | 근거 위치 |
+| `exclude` | - | 검증하지 않는 사유 한 줄. 있으면 "제외" 로 집계 |
+
+리포트에서 요건 상태는 연결된 케이스 결과로 정해진다: 통과 / 미반영(FAIL 있음) / 점검 필요(ERROR 있음) /
+일부 통과 / 미확인(승인 대기·조건 미충족뿐) / 미실행 / **미검증(케이스도 제외 사유도 없음)** / 제외.
+`requirements` 가 없으면 표를 만들지 않는다 (예전 스펙 그대로 동작).
 
 ### meta
 
@@ -30,6 +55,28 @@
 | `qa_prefix` | O | 테스트 생성 데이터에 강제로 붙는 식별자. 예: `[QA]20260911` |
 | `sources` | O | 테스트 케이스 근거가 된 기획 자료 경로 목록 |
 | `viewport` | - | `{"width":1600,"height":900}` (기본값) |
+| `residue_check` | - | 테스트 데이터 잔여 점검 스텝 목록 (또는 `{"session": "<이름>", "steps": [...]}`). 아래 참고 |
+
+### residue_check · 테스트 데이터가 남았는지
+
+cleanup 이 예외 없이 끝나도 실제로 지워졌다는 보장은 없다. 승인된 쓰기 케이스가 하나라도 실행됐으면
+마지막에 이 스텝을 돌려 확인한다. 실패하면 리포트에 "테스트 데이터가 남아 있을 수 있음" 경고가 뜨고,
+`QA-잔여` 케이스로 기획팀 검토 탭에만 실린다 (개발 전달 아님).
+
+```json
+"residue_check": {
+  "session": "",
+  "steps": [
+    {"action": "goto", "url": "/totalAdmin/popup_list.php"},
+    {"action": "fill", "selector": "#search_kw", "value": "{QA_PREFIX}", "write": false},
+    {"action": "click", "selector": "#btn_search", "write": false},
+    {"action": "expect_count", "selector": "table.list tbody tr.data", "count": 0}
+  ]
+}
+```
+
+**읽기 스텝만** 허용한다. 검색어 입력·검색 버튼처럼 서버에 쓰지 않는 조작은 `"write": false` 를 명시한다.
+쓰기로 판정되는 스텝이 있으면 실행하지 않고 `BLOCKED` 로 남긴다.
 
 ### 로그인
 
@@ -126,7 +173,9 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 | `source` | O | 근거 위치. 예: `기획_내용.md > 배너(슬라이드)` |
 | `kind` | - | 이 케이스가 실패했을 때 **누구 일인가**. 기본 `defect`. 아래 참고 |
 | `area` | - | 웍스 로그의 묶음 제목. 예: `공통`, `품절관리`, `반품/폐기` |
-| `fix` | - | **수정 지시 한 줄.** 웍스 로그에 그대로 실린다. 아래 참고 |
+| `fix` | - | **오류 한 줄.** 웍스 로그에 그대로 실린다. 아래 참고 |
+| `req` | - | 이 케이스가 검증하는 요건 ID 목록. 예: `["REQ-01"]` |
+| `severity` | - | `치명` · `주요` · `경미`. 같은 영역 안 전달 순서, `치명` 은 로그 줄 앞에 `[치명]` |
 | `writes` | O | 이 케이스가 서버에 쓰기를 하는가 (true/false) |
 | `approved` | O | **사람이 쓰기를 허용했는가.** `writes:true`인데 `approved:false`면 실행 안 하고 SKIP |
 | `chains` | - | 독립 동작을 이어 붙인 케이스인가. 실패 시 단독 재현으로 원인을 가린다 (아래 참고) |
@@ -160,22 +209,23 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 설명이 붙으면 "추가 검토 요청"으로 읽혀 일이 안 돌아간다. 그래서 로그에는 지시문만 싣는다.
 
 ```
-[09/22] 재고 대시보드 검수 · 수정 요청 5건
+[09/22] 재고 대시보드 검수 · 기획 미반영 오류 3건
 
 - 공통
-1. 긴급재고 별도 칩 삭제, 임박재고 필터·건수에 포함
-2. 담당자 컬럼 삭제
+1. [치명] 임박재고 칩 건수 오류: 긴급재고 제외하고 집계 중 (SB: 임박 + 긴급 합산)
+2. 담당자 컬럼 오류: 컬럼 노출 중 (SB: 담당자 컬럼 삭제)
 
 - 품절관리
-3. 품절예상일 N일 뒤에 " 후" 표기 (N일 후)
+3. 품절예상일 표기 오류: "N일" 로 노출 중 (SB: "N일 후")
 ```
 
 - `area` 가 묶음 제목이 된다. 화면의 구획 이름을 쓴다. 안 적으면 묶음 없이 쭉 나열된다.
-- `fix` 가 각 줄이다. **명사형으로 끝낸다** (`추가`, `삭제`, `변경`, `통일`, `표기`).
-  `~해주세요`, `~하면 좋겠습니다` 로 쓰면 요청이 아니라 제안으로 읽힌다.
-- 바뀌는 값은 `현재 > 목표` 로 적는다. 예: `숫자형 , 추가 (1000 > 1,000)`.
+- `fix` 가 각 줄이다. 형식은 **`대상 오류: 현재 현상 (SB: 기준)`** 이다.
+  `~변경`·`~추가`·`~삭제` 로 쓰면 기획 변경(신규 요청)으로 읽혀 결함으로 처리되지 않는다.
+  `~해주세요`, `~하면 좋겠습니다` 로 쓰면 제안으로 읽힌다. "변경"은 진짜 기획 변경일 때만 쓴다.
+- 근거가 SB 가 아니면 그 자료 이름을 쓴다. 예: `(기획서: 1,000 단위 쉼표)`.
 - `fix` 를 비우면 `title` 이 대신 쓰이는데, 제목은 보통 `~되지 않는다` 처럼 기대를 서술한
-  문장이라 지시문으로는 약하다. **케이스를 만들 때 같이 적는다.**
+  문장이라 오류 문장으로는 약하다. **케이스를 만들 때 같이 적는다.**
 
 번호는 `area` 묶음 순서를 따르고, 리포트의 `항목별 근거` 와 `개발전달.md` 가 **같은 번호**를
 쓴다. "3번 건" 이라고만 해도 서로 같은 걸 가리킨다.
@@ -213,6 +263,42 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 열렸을 때 "오늘" 칸을 집을 수 없다. 다만 저장된 값과 비교해야 하는 케이스(예: "기존 값과 같으면
 저장 비활성")는 고정 날짜가 맞다. 앞 실행에서 저장한 값이 실행일에 따라 달라지면 비교가 깨진다.
 
+같은 필드에서 `{QA_PREFIX}` 는 `meta.qa_prefix` 값으로 바뀐다. 잔여 데이터 점검에서 검색어로 쓴다.
+
+---
+
+## 스텝 공통 플래그
+
+| 키 | 적용 | 동작 |
+|---|---|---|
+| `precondition` | 읽기 스텝 | 이 스텝이 실패하면 케이스를 FAIL 이 아니라 **NA(조건 미충족)** 로 끝낸다. 운영 데이터에 기대는 전제 확인용 |
+| `soft` | `expect_*` | 판정이 틀려도 멈추지 않고 다음 스텝을 계속한다. 끝나고 실패를 모아 한 번에 FAIL |
+| `write` | 모든 스텝 | 쓰기 판정 강제 (아래 "쓰기 판정 규칙") |
+| `timeout` | 대기하는 스텝 | 밀리초. 기본 10000 |
+
+```json
+{"action": "expect_count", "selector": "tr[data-code='25692']", "count": 1, "precondition": true},
+{"action": "expect_text", "selector": ".notice", "contains": "배송 안내", "soft": true},
+{"action": "expect_text", "selector": ".price", "contains": "원", "soft": true}
+```
+
+`precondition` 에 쓰기 스텝을 주면 실행을 거부한다. `soft` 는 앞 스텝이 뒤 스텝의 전제인 흐름에는
+쓰지 않는다. 앞이 틀린 상태로 뒤를 보면 실패가 줄줄이 따라 나온다.
+
+## 케이스 결과 상태
+
+| 상태 | 언제 | 개발 전달 |
+|---|---|---|
+| `PASS` | 모든 판정 통과 | - |
+| `FAIL` | `expect_*` 판정이 기대와 다름 | `kind: defect` 면 O |
+| `ERROR` | 요소를 못 찾음 · 시간 초과 · 설정 오류 · cleanup 실패 | X (점검 필요) |
+| `NA` | `precondition` 불충족 | X |
+| `SKIPPED` | 쓰기 미승인 · dry-run | X |
+| `BLOCKED` | blocklist · cleanup 누락 | X |
+
+`expect_text`·`expect_attr` 처럼 요소를 기다리는 판정은, 요소 자체가 없으면 시간 초과라 `ERROR` 가
+된다. 요소가 없는 것 자체가 결함이면 `expect_visible`·`expect_count` 로 판정해야 `FAIL` 로 잡힌다.
+
 ---
 
 ## step actions
@@ -234,6 +320,7 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 | `expect_attr` | `selector`, `attr`, `equals`/`contains` | 속성값 |
 | `expect_dialog` | `contains` | 직전 액션이 띄운 알럿 문구 검증 |
 | `expect_no_dialog` | - | 직전 액션에서 알럿이 없어야 함 |
+| `expect_box` | `selector`, `width`, `height`, `below`·`above`·`left_of`·`right_of`·`inside`, `gap`, `align`, `align_to`, `tol` | 크기와 기준 요소와의 상대 위치. 아래 참고 |
 | `expect_js` | `js`, `equals`(기본 true), `desc` | JS 평가 결과 비교. CSS로 표현 못 하는 판정(노출 순서·계산값)에만 쓴다 |
 
 `{ok, detail}` 을 돌려주면 `ok` 로 판정하고 `detail` 을 실패 사유에 그대로 싣는다.
@@ -247,6 +334,30 @@ PHPSESSID	abc123...	admin.example.com	/	Session	40	...
 
 > `expect_js`는 **읽기 전용만 허용**한다. `.click(`, `.value =`, `fetch(`, `localStorage`, `dispatchEvent` 등
 > 변경성 패턴이 들어 있으면 러너가 실행을 거부한다 — 임의 JS로 쓰기 승인 게이트를 우회하지 못하게 하기 위함이다.
+
+### expect_box · 크기와 위치
+
+px 고정값, "배너 아래", "검색창 오른쪽에 붙어서" 같은 요건을 판정한다. 위치는 절대 좌표가 아니라
+**기준 요소와의 관계**로 본다. 화면 너비가 바뀌어도 판정이 흔들리지 않는다.
+
+```json
+{"action": "expect_box", "selector": ".popup_banner", "width": 500, "height": 500},
+{"action": "expect_box", "selector": ".chat_btn", "below": ".ad_banner",
+ "gap": {"min": 0, "max": 16}, "align": "left"},
+{"action": "expect_box", "selector": ".badge", "inside": ".card", "width": {"max": 80}}
+```
+
+| 키 | 뜻 |
+|---|---|
+| `width` · `height` | 숫자면 `±tol`, `{"min":..,"max":..}` 면 범위 |
+| `below` · `above` · `left_of` · `right_of` | 기준 요소 셀렉터. 그 방향에 있어야 함 (겹치면 실패) |
+| `inside` | 기준 요소 안에 들어 있어야 함 |
+| `gap` | 위 방향 관계에서 기준 요소와의 간격 (숫자 또는 범위) |
+| `align` | `left`·`right`·`top`·`bottom`·`center_x`·`center_y` 중 하나 또는 목록. 기준 요소와 그 변이 맞아야 함 |
+| `align_to` | 정렬 기준 요소. 없으면 방향 관계의 기준 요소 |
+| `tol` | 허용 오차 px. 기본 1 |
+
+실패하면 `크기·위치 불일치 - .chat_btn: .ad_banner 과의 간격 40px (기대 0~16px)` 처럼 실제 값이 사유에 남는다.
 
 ### 결함 증빙 스크린샷
 

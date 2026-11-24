@@ -6,7 +6,11 @@ QA 자동화 러너 - spec.json을 읽어 실제 사이트에서 테스트를 �
   py <skill>/qa_auto/qa_run.py qa_auto/specs/xxx.json
   py <skill>/qa_auto/qa_run.py ... --dry-run       쓰기 스텝 전부 건너뜀 (셀렉터 검증용)
   py <skill>/qa_auto/qa_run.py ... --headed        브라우저 띄워서 눈으로 확인
-  py <skill>/qa_auto/qa_run.py ... --case TC-003   특정 케이스만
+  py <skill>/qa_auto/qa_run.py ... --case TC-003,TC-007   특정 케이스만 (쉼표로 여러 개)
+  py <skill>/qa_auto/qa_run.py ... --rerun-failed latest   지난 실행에서 실패·점검 필요였던 케이스만
+  py <skill>/qa_auto/qa_run.py ... --compare <결과폴더>     비교 기준 실행 지정 (기본: 직전 실행)
+  py <skill>/qa_auto/qa_run.py ... --no-retry      실패 케이스 1회 재실행 끄기
+  py <skill>/qa_auto/qa_run.py ... --no-trace      실패 케이스 동작 기록(trace) 끄기
   py <skill>/qa_auto/qa_run.py --login URL [URL2 ...] --ws qa_auto
                                                    로그인 창. 로그인하면 저장 후 저절로 닫힘
 
@@ -70,7 +74,7 @@ READ_ACTIONS = {
     "goto", "wait", "screenshot", "hover",
     "expect_visible", "expect_hidden", "expect_text",
     "expect_count", "expect_attr", "expect_dialog", "expect_no_dialog",
-    "expect_js", "download", "expect_file",
+    "expect_js", "download", "expect_file", "expect_box",
 }
 
 # expect_js 는 읽기 전용이어야 한다. 아래 패턴이 보이면 실행을 거부해
@@ -97,8 +101,15 @@ SESSION_KEYS = ("auth", "cookies", "user_agent", "login_check", "viewport")
 DATE_TOKEN = re.compile(r"\{TODAY(?:([+-])(\d+))?\}")
 TOKEN_FIELDS = ("selector", "value", "text", "url", "js", "contains", "not_contains")
 
+# 실패로 보는 상태. 재실행 · 지난 실행 비교 · 종료 코드가 이 묶음을 쓴다.
+BAD = ("FAIL", "ERROR")
 
-def expand_tokens(step):
+
+def expand_tokens(step, qa_prefix=""):
+    """{TODAY±N} 은 실행일, {QA_PREFIX} 는 meta.qa_prefix 로 바꾼다.
+
+    {QA_PREFIX} 는 잔여 데이터 점검처럼 테스트 데이터를 검색할 때 쓴다.
+    """
     def rep(m):
         d = date.today()
         if m.group(1):
@@ -106,8 +117,11 @@ def expand_tokens(step):
         return d.isoformat()
     out = dict(step)
     for k in TOKEN_FIELDS:
-        if isinstance(out.get(k), str) and "{TODAY" in out[k]:
-            out[k] = DATE_TOKEN.sub(rep, out[k])
+        if isinstance(out.get(k), str):
+            if "{TODAY" in out[k]:
+                out[k] = DATE_TOKEN.sub(rep, out[k])
+            if "{QA_PREFIX}" in out[k]:
+                out[k] = out[k].replace("{QA_PREFIX}", qa_prefix)
     return out
 
 
@@ -251,7 +265,57 @@ def read_table(path):
 # -- 스텝 실행 --------------------------------------------------
 
 class StepFailure(Exception):
+    """검수 스크립트 쪽 문제 (설정 오류 · 파일 없음 등). 케이스는 ERROR(점검 필요)."""
     pass
+
+
+class AssertFail(StepFailure):
+    """화면이 기대와 다르다는 판정. 케이스는 FAIL 이고, defect 면 개발 전달 대상이다.
+
+    셀렉터를 못 찾거나 시간 초과가 난 것과 구분해야 한다. 둘을 같은 FAIL 로 두면
+    셀렉터가 낡아서 난 실패까지 결함으로 개발팀에 넘어간다.
+    """
+    pass
+
+
+class PreconditionUnmet(Exception):
+    """precondition 스텝이 안 맞음. 운영 데이터가 바뀐 것이지 결함이 아니므로 NA."""
+    pass
+
+
+def _reason(e):
+    """예외를 사유 한 줄로. 시간 초과는 왜 점검이 필요한지 같이 적는다."""
+    msg = str(e).split("\n")[0][:300]
+    if isinstance(e, PWTimeout) or ("Timeout" in msg and "exceeded" in msg):
+        return "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 ({})".format(msg[:200])
+    return msg
+
+
+REL_KO = {"below": "아래", "above": "위", "right_of": "오른쪽", "left_of": "왼쪽", "inside": "안"}
+ALIGN_KO = {"left": "왼쪽", "right": "오른쪽", "top": "위쪽", "bottom": "아래쪽",
+            "center_x": "가로 가운데", "center_y": "세로 가운데"}
+
+
+def _range(want, tol):
+    """숫자면 ±tol, {"min":..,"max":..} 면 그 범위."""
+    if isinstance(want, dict):
+        return want.get("min", float("-inf")), want.get("max", float("inf"))
+    return want - tol, want + tol
+
+
+def _range_text(want):
+    if isinstance(want, dict):
+        lo, hi = want.get("min"), want.get("max")
+        if lo is not None and hi is not None:
+            return "{}~{}px".format(lo, hi)
+        return "{}px 이상".format(lo) if lo is not None else "{}px 이하".format(hi)
+    return "{}px".format(want)
+
+
+def _edge(b, name):
+    return {"left": b["x"], "right": b["x"] + b["width"], "top": b["y"],
+            "bottom": b["y"] + b["height"], "center_x": b["x"] + b["width"] / 2,
+            "center_y": b["y"] + b["height"] / 2}[name]
 
 
 class Runner:
@@ -270,7 +334,39 @@ class Runner:
         self.warnings = []
         self.shots = []
         self.files = {}   # download 로 받은 파일
+        self.signals = []  # 케이스 하나 동안 난 JS 오류 · 콘솔 오류 · 실패한 요청 (참고용)
+        self.attach(page)
+
+    def attach(self, page):
+        """페이지에 알럿 처리와 콘솔 · 네트워크 오류 수집을 붙인다.
+
+        화면은 멀쩡한데 JS 오류나 API 500 이 나는 경우가 있다. 기획서 근거가 아니므로
+        판정에는 쓰지 않고, 리포트에 참고로만 싣는다.
+        """
         page.on("dialog", self._on_dialog)
+        page.on("pageerror", lambda e: self._signal(
+            "JS 오류: {}".format(str(e).split("\n")[0][:200])))
+        page.on("console", self._on_console)
+        page.on("response", self._on_response)
+
+    def _signal(self, s):
+        if s not in self.signals and len(self.signals) < 20:
+            self.signals.append(s)
+
+    def _on_console(self, m):
+        try:
+            # 이미지 404 같은 리소스 로드 실패는 소음이 커서 뺀다. 중요한 요청은 _on_response 가 잡는다.
+            if m.type == "error" and not m.text.startswith("Failed to load resource"):
+                self._signal("콘솔 오류: {}".format(m.text.split("\n")[0][:200]))
+        except Exception:
+            pass
+
+    def _on_response(self, resp):
+        try:
+            if resp.status >= 400 and resp.request.resource_type in ("xhr", "fetch", "document"):
+                self._signal("HTTP {} {}".format(resp.status, resp.url[:160]))
+        except Exception:
+            pass
 
     def use_page(self, page, login_check):
         """케이스가 다른 세션이면 그 세션의 페이지로 갈아탄다 (meta.sessions 참고).
@@ -402,8 +498,75 @@ class Runner:
         return {"x": max(0, x0), "y": max(0, y0),
                 "width": min(x1 - x0, vw["width"]), "height": y1 - y0}
 
+    def _box(self, sel, timeout):
+        loc = self.page.locator(sel).first
+        loc.wait_for(state="visible", timeout=timeout)
+        b = loc.bounding_box()
+        if not b:
+            raise StepFailure("위치를 잡을 수 없음: {}".format(sel))
+        return b
+
+    def _expect_box(self, step):
+        """크기와 기준 요소와의 상대 위치를 본다.
+
+        px 고정값이나 "A 아래에 B" 같은 위치 요건을 매번 expect_js 로 짜면 좌표 계산을
+        잘못 적어 거짓 통과가 나기 쉽다. 위치는 절대 좌표가 아니라 기준 요소와의 관계로 판정한다.
+        """
+        sel, tol = step["selector"], step.get("tol", 1)
+        timeout = step.get("timeout", 10000)
+        b = self._box(sel, timeout)
+        errs = []
+
+        for key, ko in (("width", "너비"), ("height", "높이")):
+            if key in step:
+                lo, hi = _range(step[key], tol)
+                if not lo <= b[key] <= hi:
+                    errs.append("{} {:.0f}px (기대 {})".format(ko, b[key], _range_text(step[key])))
+
+        first_ref = None
+        for rel, ko in REL_KO.items():
+            ref = step.get(rel)
+            if not ref:
+                continue
+            rb = self._box(ref, timeout)
+            first_ref = first_ref or (ref, rb)
+            if rel == "inside":
+                ok = (b["x"] >= rb["x"] - tol and b["y"] >= rb["y"] - tol
+                      and b["x"] + b["width"] <= rb["x"] + rb["width"] + tol
+                      and b["y"] + b["height"] <= rb["y"] + rb["height"] + tol)
+                if not ok:
+                    errs.append("{} 밖으로 벗어남".format(ref))
+                continue
+            gap = {"below": b["y"] - (rb["y"] + rb["height"]),
+                   "above": rb["y"] - (b["y"] + b["height"]),
+                   "right_of": b["x"] - (rb["x"] + rb["width"]),
+                   "left_of": rb["x"] - (b["x"] + b["width"])}[rel]
+            if gap < -tol:
+                errs.append("{} {}에 있지 않음 (경계에서 {:.0f}px 안쪽)".format(ref, ko, -gap))
+            elif "gap" in step:
+                lo, hi = _range(step["gap"], tol)
+                if not lo <= gap <= hi:
+                    errs.append("{} 과의 간격 {:.0f}px (기대 {})".format(
+                        ref, gap, _range_text(step["gap"])))
+
+        if step.get("align"):
+            ref = step.get("align_to")
+            if ref:
+                rb = self._box(ref, timeout)
+            elif first_ref:
+                ref, rb = first_ref
+            else:
+                raise StepFailure("align 은 align_to 또는 below·above 등 기준 요소가 필요하다")
+            for a in (step["align"] if isinstance(step["align"], list) else [step["align"]]):
+                d = _edge(b, a) - _edge(rb, a)
+                if abs(d) > tol:
+                    errs.append("{} 과 {} 정렬 어긋남 ({:+.0f}px)".format(ref, ALIGN_KO[a], d))
+
+        if errs:
+            raise AssertFail("크기·위치 불일치 - {}: {}".format(sel, " / ".join(errs)))
+
     def run(self, step, case_id, idx):
-        step = expand_tokens(step)
+        step = expand_tokens(step, self.qa_prefix)
         action = step.get("action")
         if action not in ALL_ACTIONS:
             raise StepFailure("정의되지 않은 action: {}".format(action))
@@ -447,22 +610,22 @@ class Runner:
                 raise StepFailure("받아둔 파일이 없음: {} (download 스텝이 먼저 와야 한다)".format(key))
             rows = read_table(path)
             if not rows:
-                raise StepFailure("파일에서 행을 못 읽음: {}".format(path.name))
+                raise AssertFail("파일에서 행을 못 읽음: {}".format(path.name))
 
             if step.get("headers"):
                 got = [c.replace(" ", "") for c in rows[0]]
                 want = [c.replace(" ", "") for c in step["headers"]]
                 if got[:len(want)] != want:
-                    raise StepFailure("헤더 불일치 - 기대:{} / 실제:{}".format(want, got[:len(want)]))
+                    raise AssertFail("헤더 불일치 - 기대:{} / 실제:{}".format(want, got[:len(want)]))
 
             body = len(rows) - (1 if step.get("headers") else 0)
             if "min_rows" in step and body < step["min_rows"]:
-                raise StepFailure("행 수 미달 - 기대:{}행 이상 / 실제:{}행".format(step["min_rows"], body))
+                raise AssertFail("행 수 미달 - 기대:{}행 이상 / 실제:{}행".format(step["min_rows"], body))
             if "row_count_js" in step:
                 # 운영 데이터는 계속 바뀌므로 기대값을 화면에서 읽어 비교한다
                 expected = self.page.evaluate(step["row_count_js"])
                 if body != expected:
-                    raise StepFailure(
+                    raise AssertFail(
                         "행 수 불일치 - 화면 {}행 / 파일 {}행".format(expected, body))
             return None
 
@@ -535,48 +698,51 @@ class Runner:
 
         elif action == "expect_visible":
             if not self.page.is_visible(sel):
-                raise StepFailure("보여야 할 요소가 안 보임: {}".format(sel))
+                raise AssertFail("보여야 할 요소가 안 보임: {}".format(sel))
 
         elif action == "expect_hidden":
             if self.page.is_visible(sel):
-                raise StepFailure("숨겨져야 할 요소가 보임: {}".format(sel))
+                raise AssertFail("숨겨져야 할 요소가 보임: {}".format(sel))
 
         elif action == "expect_text":
             actual = (self.page.text_content(sel, timeout=step.get("timeout", 10000)) or "").strip()
             if "contains" in step and step["contains"] not in actual:
-                raise StepFailure("문구 불일치 - 기대:'{}' / 실제:'{}'".format(
+                raise AssertFail("문구 불일치 - 기대:'{}' / 실제:'{}'".format(
                     step["contains"], actual[:120]))
             if "not_contains" in step and step["not_contains"] in actual:
-                raise StepFailure("있으면 안 되는 문구가 있음 - '{}' / 실제:'{}'".format(
+                raise AssertFail("있으면 안 되는 문구가 있음 - '{}' / 실제:'{}'".format(
                     step["not_contains"], actual[:150]))
 
         elif action == "expect_count":
             n = self.page.locator(sel).count()
             if "count" in step and n != step["count"]:
-                raise StepFailure("개수 불일치 - 기대:{} / 실제:{}".format(step["count"], n))
+                raise AssertFail("개수 불일치 - 기대:{} / 실제:{}".format(step["count"], n))
             if "min" in step and n < step["min"]:
-                raise StepFailure("최소 개수 미달 - 기대:{}개 이상 / 실제:{}".format(step["min"], n))
+                raise AssertFail("최소 개수 미달 - 기대:{}개 이상 / 실제:{}".format(step["min"], n))
 
         elif action == "expect_attr":
             val = self.page.get_attribute(sel, step["attr"]) or ""
             if "equals" in step and val != step["equals"]:
-                raise StepFailure("{} 불일치 - 기대:'{}' / 실제:'{}'".format(
+                raise AssertFail("{} 불일치 - 기대:'{}' / 실제:'{}'".format(
                     step["attr"], step["equals"], val))
             if "contains" in step and step["contains"] not in val:
-                raise StepFailure("{}에 '{}' 없음 - 실제:'{}'".format(
+                raise AssertFail("{}에 '{}' 없음 - 실제:'{}'".format(
                     step["attr"], step["contains"], val))
 
         elif action == "expect_dialog":
             if not self.dialogs:
-                raise StepFailure("알럿이 떠야 하는데 안 뜸 - 기대 문구:'{}'".format(step["contains"]))
+                raise AssertFail("알럿이 떠야 하는데 안 뜸 - 기대 문구:'{}'".format(step["contains"]))
             joined = " | ".join(self.dialogs)
             if step["contains"] not in joined:
-                raise StepFailure("알럿 문구 불일치 - 기대:'{}' / 실제:'{}'".format(
+                raise AssertFail("알럿 문구 불일치 - 기대:'{}' / 실제:'{}'".format(
                     step["contains"], joined))
 
         elif action == "expect_no_dialog":
             if self.dialogs:
-                raise StepFailure("알럿이 뜨면 안 되는데 뜸: {}".format(" | ".join(self.dialogs)))
+                raise AssertFail("알럿이 뜨면 안 되는데 뜸: {}".format(" | ".join(self.dialogs)))
+
+        elif action == "expect_box":
+            self._expect_box(step)
 
         elif action == "expect_js":
             # CSS로 표현 안 되는 판정(노출 순서·계산값 비교)에만 쓴다. 읽기 전용 강제.
@@ -594,14 +760,14 @@ class Runner:
             if isinstance(value, dict) and "ok" in value:
                 if not value["ok"]:
                     detail = value.get("detail", "")
-                    raise StepFailure("{}{}".format(
+                    raise AssertFail("{}{}".format(
                         step.get("desc", "expect_js 불일치"),
                         " - {}".format(detail) if detail else ""))
                 return None
 
             expected = step.get("equals", True)
             if value != expected:
-                raise StepFailure("{} - 기대:{} / 실제:{}".format(
+                raise AssertFail("{} - 기대:{} / 실제:{}".format(
                     step.get("desc", "expect_js 불일치"), expected, value))
 
         return None
@@ -653,15 +819,20 @@ def run_case(runner, case, blocklist, dry_run):
         "source": case.get("source", ""),
         # 실패했을 때 개발팀에 넘길 건지 기획팀이 먼저 볼 건지를 가르는 값
         "kind": case.get("kind", "defect"),
-        # 웍스 등록용 로그에 쓰는 값. area 는 묶음 제목, fix 는 수정 지시 한 줄
+        # 웍스 등록용 로그에 쓰는 값. area 는 묶음 제목, fix 는 오류 한 줄
         "area": case.get("area", ""),
         "fix": case.get("fix", ""),
         "writes": case.get("writes", False),
         "approved": case.get("approved", False),
+        # 치명 · 주요 · 경미. 개발 전달 목록에서 같은 영역 안의 순서를 정한다
+        "severity": case.get("severity", ""),
+        # 이 케이스가 검증하는 요건 ID (스펙 최상위 requirements). 요건 커버리지 계산용
+        "req": case.get("req") or [],
         "status": "PASS",
         "reason": "",
         "steps": [],
         "shots": [],
+        "signals": [],
         "duration": 0,
     }
     t0 = time.time()
@@ -687,6 +858,8 @@ def run_case(runner, case, blocklist, dry_run):
             return result
 
     shots_before = len(runner.shots)
+    runner.signals = []
+    soft_fails = []
 
     def exec_steps(steps, phase):
         for i, step in enumerate(steps, 1):
@@ -696,6 +869,8 @@ def run_case(runner, case, blocklist, dry_run):
             )
             act = step.get("action")
             write = is_write_step(step)
+            if step.get("precondition") and write:
+                raise StepFailure("precondition 스텝은 읽기만 가능: {}".format(label))
             # 승인된 케이스여도 dry-run이면 쓰기 스텝은 건너뜀
             if write and dry_run:
                 result["steps"].append({"phase": phase, "n": i, "label": label,
@@ -708,18 +883,37 @@ def run_case(runner, case, blocklist, dry_run):
                                         "action": act,
                                         "status": "OK", "write": write, "msg": ""})
             except Exception as e:
-                msg = str(e).split("\n")[0][:300]
+                msg = _reason(e)
                 result["steps"].append({"phase": phase, "n": i, "label": label,
-                                        "action": act,
+                                        "action": act, "pre": bool(step.get("precondition")),
                                         "status": "FAIL", "write": write, "msg": msg})
+                if phase == "test" and step.get("precondition"):
+                    raise PreconditionUnmet(msg)
+                # soft: 판정이 틀려도 멈추지 않고 다음 검증까지 본다. 끝나고 한꺼번에 실패 처리
+                if (phase == "test" and step.get("soft") and isinstance(e, AssertFail)
+                        and act.startswith("expect_")):
+                    soft_fails.append(msg)
+                    continue
                 raise
 
     try:
         exec_steps(case["steps"], "test")
+        if soft_fails:
+            raise AssertFail(" / ".join(soft_fails))
     except SessionExpired:
         raise                      # 개별 케이스 실패로 묻지 않고 전체 실행을 멈춘다
+    except PreconditionUnmet as e:
+        # 운영 데이터가 바뀌어 검수할 대상이 없는 것. 결함도 스크립트 오류도 아니다
+        result.update(status="NA", reason="조건 미충족 - {}".format(e))
+        try:
+            runner._shoot("{}_NA".format(cid))
+        except Exception:
+            pass
     except Exception as e:
-        result.update(status="FAIL", reason=str(e).split("\n")[0][:300])
+        # 화면이 기대와 다르면 FAIL, 요소를 못 찾았거나 시간 초과 · 설정 오류면 ERROR(점검 필요).
+        # ERROR 는 개발 전달에 넣지 않는다. 셀렉터가 낡아서 난 실패를 결함으로 넘기지 않기 위함이다.
+        result.update(status="FAIL" if isinstance(e, AssertFail) else "ERROR",
+                      reason=_reason(e))
         try:
             runner._shoot("{}_FAIL".format(cid))
         except Exception:
@@ -736,13 +930,67 @@ def run_case(runner, case, blocklist, dry_run):
         try:
             exec_steps(case["cleanup"], "cleanup")
         except Exception as e:
-            result["reason"] += " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}".format(str(e)[:150])
+            result["reason"] += " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}".format(_reason(e)[:150])
+            # 정리 실패는 테스트 데이터 문제지 구현 결함이 아니다. 개발 전달로 가지 않게 ERROR 로 둔다
             if result["status"] == "PASS":
-                result["status"] = "FAIL"
+                result["status"] = "ERROR"
 
     result["duration"] = round(time.time() - t0, 1)
     result["shots"] = runner.shots[shots_before:]
+    result["signals"] = list(runner.signals)
     return result
+
+
+def _past_runs(out_root, project):
+    """같은 프로젝트의 지난 실행 폴더 (results.json 있는 것만), 오래된 순."""
+    pat = re.compile(r"^{}_\d{{8}}_\d{{4,6}}$".format(re.escape(project)))
+    if not out_root.exists():
+        return []
+    return sorted((d for d in out_root.iterdir()
+                   if d.is_dir() and pat.match(d.name) and (d / "results.json").exists()),
+                  key=lambda d: d.name)
+
+
+def _load_results(folder):
+    data = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+    return data["results"] if isinstance(data, dict) else data
+
+
+def _resolve_run(arg, past, out_root):
+    """--rerun-failed · --compare 값을 실행 폴더로. 'latest' 면 직전 실행."""
+    if arg == "latest":
+        return past[-1] if past else None
+    for cand in (Path(arg), out_root / arg):
+        if (cand / "results.json").exists():
+            return cand.resolve()
+    return None
+
+
+def mark_trend(results, prev_results):
+    """지난 실행 대비 변화. 개발팀이 고쳤다고 한 뒤 다시 돌릴 때 가장 먼저 보는 정보다."""
+    prev = {r["id"]: r["status"] for r in prev_results}
+    for r in results:
+        p, now = prev.get(r["id"]), r["status"]
+        if p in BAD and now == "PASS":
+            r["trend"] = "fixed"
+        elif p in BAD and now in BAD:
+            r["trend"] = "still"
+        elif now in BAD and p != "NA" and p not in ("SKIPPED", "BLOCKED"):
+            r["trend"] = "new"          # 지난번 통과(회귀) 또는 이번에 새로 생긴 케이스
+    return results
+
+
+def validate_spec(spec, warnings):
+    """실행 전에 잡을 수 있는 스펙 실수. 멈추지는 않고 경고로 남긴다."""
+    reqs = {q["id"] for q in spec.get("requirements", [])}
+    for c in spec.get("cases", []):
+        for rid in c.get("req") or []:
+            if reqs and rid not in reqs:
+                warnings.append("{}: requirements 에 없는 요건 ID '{}'".format(c["id"], rid))
+        for st in c.get("steps", []):
+            if st.get("soft") and not str(st.get("action", "")).startswith("expect_"):
+                warnings.append("{}: soft 는 expect_* 스텝에만 적용됨 ({})".format(
+                    c["id"], st.get("action")))
 
 
 # -- 작업 폴더 초기화 -------------------------------------------
@@ -807,12 +1055,14 @@ exit /b 1
 echo.
 echo   1. 읽기만 실행  (안전 - 쓰기 케이스는 건너뜀)
 echo   2. 전체 실행    (승인된 쓰기 케이스까지 실행)
+echo   3. 지난 실행에서 실패한 것만 다시 (읽기만)
 echo.
 set "MODE="
 set /p "MODE=모드 번호 입력 [기본 1]: "
 if not defined MODE set "MODE=1"
 
 set "OPT=--dry-run"
+if "%MODE%"=="3" set "OPT=--dry-run --rerun-failed latest"
 if not "%MODE%"=="2" goto :run
 
 set "OPT="
@@ -1136,7 +1386,13 @@ def main():
                     help="--login 이 저장할 작업 폴더 (기본: ./qa_auto)")
     ap.add_argument("--dry-run", action="store_true", help="쓰기 스텝 전부 건너뜀")
     ap.add_argument("--headed", action="store_true", help="브라우저 표시")
-    ap.add_argument("--case", help="특정 케이스 ID만 실행")
+    ap.add_argument("--case", help="특정 케이스 ID만 실행 (쉼표로 여러 개)")
+    ap.add_argument("--rerun-failed", metavar="RUN",
+                    help="지난 실행(결과 폴더 또는 latest)에서 실패·점검 필요였던 케이스만 실행")
+    ap.add_argument("--compare", metavar="RUN",
+                    help="비교 기준 실행 폴더 (기본: --rerun-failed 대상 또는 직전 실행)")
+    ap.add_argument("--no-retry", action="store_true", help="실패 케이스 1회 재실행 끄기")
+    ap.add_argument("--no-trace", action="store_true", help="실패 케이스 동작 기록(trace) 끄기")
     args = ap.parse_args()
 
     if args.init:
@@ -1153,22 +1409,59 @@ def main():
 
     workspace = resolve_workspace(spec_path)
     meta = spec["meta"]
-    stamp = datetime.now().strftime("%Y%m%d_%H%M")
-    out_dir = workspace / "output" / "{}_{}".format(meta["project"], stamp)
-    shot_dir = out_dir / "screenshots"
-    shot_dir.mkdir(parents=True, exist_ok=True)
+    out_root = workspace / "output"
+    past = _past_runs(out_root, meta["project"])
 
     cases = spec["cases"]
     if args.case:
-        cases = [c for c in cases if c["id"] == args.case]
-        if not cases:
-            print("[!] 케이스 없음: {}".format(args.case))
+        ids = [x.strip() for x in args.case.split(",") if x.strip()]
+        cases = [c for c in cases if c["id"] in ids]
+        missing = [i for i in ids if i not in {c["id"] for c in cases}]
+        if missing:
+            print("[!] 케이스 없음: {}".format(", ".join(missing)))
             sys.exit(1)
+
+    # 재검수: 개발팀이 고쳤다고 한 뒤 지난번 실패만 다시 돌린다
+    rerun_base = None
+    if args.rerun_failed:
+        rerun_base = _resolve_run(args.rerun_failed, past, out_root)
+        if rerun_base is None:
+            print("[!] 지난 실행 결과를 찾을 수 없음: {}".format(args.rerun_failed))
+            sys.exit(1)
+        bad_ids = {r["id"] for r in _load_results(rerun_base) if r["status"] in BAD}
+        cases = [c for c in cases if c["id"] in bad_ids]
+        print("[*] 재검수 기준: {} (실패·점검 필요 {}건)".format(rerun_base.name, len(cases)))
+        if not cases:
+            print("[*] 지난 실행에 다시 돌릴 실패가 없습니다.")
+            return 0
+
+    compare_base = (_resolve_run(args.compare, past, out_root) if args.compare
+                    else rerun_base or (past[-1] if past else None))
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = out_root / "{}_{}".format(meta["project"], stamp)
+    shot_dir = out_dir / "screenshots"
+    shot_dir.mkdir(parents=True, exist_ok=True)
 
     print("[*] 대상: {}".format(meta["base_url"].replace("{QA_ROOT}", SKILL_DIR.as_uri())))
     print("[*] 작업폴더: {}".format(workspace))
     print("[*] 케이스: {}건{}".format(
         len(cases), "  (DRY-RUN - 쓰기 없음)" if args.dry_run else ""))
+
+    # 잔여 데이터 점검: 승인된 쓰기 케이스가 실제로 돈 경우에만 마지막에 한 번
+    rc = meta.get("residue_check")
+    if isinstance(rc, list):
+        rc = {"steps": rc}
+    wrote = not args.dry_run and any(c.get("writes") and c.get("approved") for c in cases)
+    residue = None
+    if rc and wrote:
+        residue = {"id": "QA-잔여", "title": "테스트 데이터 잔여 확인",
+                   "requirement": "쓰기 케이스가 만든 {} 데이터가 남아 있지 않아야 한다".format(
+                       meta.get("qa_prefix", "")),
+                   "source": "meta.residue_check", "kind": "qa", "writes": False,
+                   "session": rc.get("session", ""), "steps": rc.get("steps", [])}
+        if not residue["session"]:
+            residue.pop("session")
 
     # 세션: meta 의 auth/cookies/user_agent/login_check 가 기본 세션이고, meta.sessions 에
     # 이름 붙인 세션을 더 둘 수 있다 ({} 면 비로그인). 케이스의 "session" 으로 고른다.
@@ -1176,17 +1469,21 @@ def main():
     sessions = {"": {k: meta[k] for k in SESSION_KEYS if k in meta}}
     sessions[""]["label"] = meta.get("session_label", "")
     sessions.update(meta.get("sessions") or {})
-    unknown = sorted({c.get("session") for c in cases if c.get("session", "") not in sessions})
+    all_cases = cases + ([residue] if residue else [])
+    unknown = sorted({c.get("session") for c in all_cases if c.get("session", "") not in sessions})
     if unknown:
         print("[!] meta.sessions 에 없는 session: {}".format(", ".join(unknown)))
         sys.exit(1)
     used = []
-    for c in cases:
+    for c in all_cases:
         name = c.get("session", "")
         if name not in used:
             used.append(name)
     ctx_args = {name: _context_args(sessions[name], name, meta, spec_path, workspace) for name in used}
 
+    trace = not args.no_trace
+    trace_dir = out_dir / "traces"
+    blocklist = spec.get("blocklist", [])
     results = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not args.headed)
@@ -1198,24 +1495,67 @@ def main():
                 ctx = browser.new_context(**ctx_args[name])
                 if sessions[name].get("cookies"):
                     ctx.add_cookies(load_cookies(spec_path, sessions[name]["cookies"], workspace))
+                if trace:
+                    # 실패 케이스의 동작을 그대로 재생할 수 있게 남긴다. 통과 케이스 기록은 버린다
+                    ctx.tracing.start(screenshots=True, snapshots=True)
                 pg = ctx.new_page()
                 if runner is not None:
-                    pg.on("dialog", runner._on_dialog)
+                    runner.attach(pg)
                 pages[name] = pg
             return pages[name]
 
         runner = Runner(page_for(used[0] if used else ""), spec, spec_path, shot_dir, workspace)
+        validate_spec(spec, runner.warnings)
 
+        def run_one(case):
+            name = case.get("session", "")
+            runner.use_page(page_for(name), sessions[name].get("login_check"))
+            tracing = runner.page.context.tracing
+            if trace:
+                tracing.start_chunk(title=case["id"])
+            r = run_case(runner, case, blocklist, args.dry_run)
+            # 한 번 실패로 단정하지 않는다. 서버가 잠깐 느렸던 건지 진짜 결함인지 가린다.
+            # 쓰기 케이스는 운영 데이터를 한 번 더 만들게 되므로 재실행하지 않는다.
+            if r["status"] in BAD and not args.no_retry and not case.get("writes"):
+                first = r["reason"]
+                r = run_case(runner, case, blocklist, args.dry_run)
+                if r["status"] == "PASS":
+                    r["flaky"] = first
+                else:
+                    r["retried"] = True
+            if trace:
+                if r["status"] in BAD:
+                    trace_dir.mkdir(parents=True, exist_ok=True)
+                    tname = re.sub(r'[\\/:*?"<>|]', "_", case["id"]) + ".zip"
+                    tracing.stop_chunk(path=str(trace_dir / tname))
+                    r["trace"] = "traces/" + tname
+                else:
+                    tracing.stop_chunk()
+            r["session"] = sessions[name].get("label") or name
+            icon = {"PASS": "O", "FAIL": "X", "ERROR": "E", "NA": "~",
+                    "SKIPPED": "-", "BLOCKED": "!"}[r["status"]]
+            tag = " ({})".format(r["session"]) if r["session"] else ""
+            if r.get("flaky"):
+                tag += " [재실행 통과]"
+            print("  [{}] {}{} {}  {}".format(icon, r["id"], tag, r["title"][:50], r["reason"][:60]))
+            return r
+
+        name = ""
         try:
             for case in cases:
                 name = case.get("session", "")
-                runner.use_page(page_for(name), sessions[name].get("login_check"))
-                r = run_case(runner, case, spec.get("blocklist", []), args.dry_run)
-                r["session"] = sessions[name].get("label") or name
+                results.append(run_one(case))
+            if residue:
+                name = residue.get("session", "")
+                if any(is_write_step(s) for s in residue["steps"]):
+                    r = run_case(runner, dict(residue, steps=[]), blocklist, args.dry_run)
+                    r.update(status="BLOCKED", reason="residue_check 에 쓰기 스텝이 있음 - 읽기만 가능")
+                else:
+                    r = run_one(residue)
+                if r["status"] != "PASS":
+                    runner.warnings.append(
+                        "테스트 데이터가 남아 있을 수 있음 - 수동 확인 필요: {}".format(r["reason"]))
                 results.append(r)
-                icon = {"PASS": "O", "FAIL": "X", "SKIPPED": "-", "BLOCKED": "!"}[r["status"]]
-                tag = " ({})".format(r["session"]) if r["session"] else ""
-                print("  [{}] {}{} {}  {}".format(icon, r["id"], tag, r["title"][:50], r["reason"][:60]))
         except SessionExpired as e:
             browser.close()
             print("\n[!] 실행 중단 - {}{}".format(
@@ -1225,16 +1565,26 @@ def main():
 
         browser.close()
 
+    prev = None
+    if compare_base is not None:
+        mark_trend(results, _load_results(compare_base))
+        prev = {"name": compare_base.name}
+
     report_path = build_report(spec, results, runner.warnings, out_dir,
-                               args.dry_run, str(spec_path))
-    passed = sum(1 for r in results if r["status"] == "PASS")
-    failed = sum(1 for r in results if r["status"] == "FAIL")
-    print("\n[*] 결과: 통과 {} / 실패 {} / 전체 {}".format(passed, failed, len(results)))
+                               args.dry_run, str(spec_path), prev=prev,
+                               partial=bool(args.case or args.rerun_failed))
+    count = {k: sum(1 for r in results if r["status"] == k) for k in ("PASS", "FAIL", "ERROR", "NA")}
+    print("\n[*] 결과: 통과 {} / 실패 {} / 점검 필요 {} / 조건 미충족 {} / 전체 {}".format(
+        count["PASS"], count["FAIL"], count["ERROR"], count["NA"], len(results)))
+    if prev:
+        tr = [r.get("trend") for r in results]
+        print("[*] 지난 실행({}) 대비: 수정됨 {} / 계속 실패 {} / 새로 실패 {}".format(
+            prev["name"], tr.count("fixed"), tr.count("still"), tr.count("new")))
     print("[*] 리포트: {}".format(report_path))
     n_dev = len(_dev_items(results))
     if n_dev:
         print("[*] 개발 전달용 {}건: {}".format(n_dev, out_dir / "개발전달.md"))
-    return 1 if failed else 0
+    return 1 if count["FAIL"] or count["ERROR"] else 0
 
 
 if __name__ == "__main__":

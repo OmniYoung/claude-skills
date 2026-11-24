@@ -21,10 +21,15 @@
   <button id="save">저장</button>
   <button id="search">조회</button>
 
+  <div id="banner" style="width:500px;height:100px;background:#eee">배너</div>
+  <div id="chat" style="width:200px;height:50px;margin-top:10px;background:#ddd">채팅</div>
+  <button id="boom">오류 버튼</button>
+
   <script>
     document.getElementById('use-y').onclick = () => document.getElementById('popup-form').style.display = 'block';
     document.getElementById('use-n').onclick = () => document.getElementById('popup-form').style.display = 'none';
     document.getElementById('save').onclick = () => alert('이미지 사이즈가 맞지 않습니다. (500×500 px로 등록해주세요.)');
     document.getElementById('search').onclick = () => { document.getElementById('title').textContent = '조회 완료'; };
+    document.getElementById('boom').onclick = () => { throw new Error('스모크 JS 오류'); };
   </script>
 </body></html>

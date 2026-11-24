@@ -14,11 +14,16 @@ from datetime import datetime
 from pathlib import Path
 
 STATUS_META = {
-    "PASS":    ("통과",      "#0f7b3f", "#e7f6ed"),
-    "FAIL":    ("실패",      "#c0362c", "#fdecea"),
-    "SKIPPED": ("승인 대기",  "#8a6100", "#fff6e0"),
-    "BLOCKED": ("차단",      "#5b4bbd", "#eeebfa"),
+    "PASS":    ("통과",       "#0f7b3f", "#e7f6ed"),
+    "FAIL":    ("실패",       "#c0362c", "#fdecea"),
+    # 화면 판정까지 못 간 것 (요소 없음 · 시간 초과 · 설정 오류). 결함인지 스크립트 문제인지 사람이 본다
+    "ERROR":   ("점검 필요",   "#9a3412", "#fff1e6"),
+    # precondition 이 안 맞음. 운영 데이터가 바뀌어 검수할 대상이 없는 것
+    "NA":      ("조건 미충족", "#4b5563", "#eef1f5"),
+    "SKIPPED": ("승인 대기",   "#8a6100", "#fff6e0"),
+    "BLOCKED": ("차단",       "#5b4bbd", "#eeebfa"),
 }
+CHIP_ORDER = ("FAIL", "ERROR", "PASS", "NA", "SKIPPED", "BLOCKED")
 
 # 케이스의 성격. 실패했을 때 그 실패를 누구에게 넘기는지가 달라진다.
 #   to_dev=True  -> 확정 기획서에 근거가 있으므로 구현 결함. 개발팀 전달 대상.
@@ -27,8 +32,14 @@ KIND_META = {
     "defect":  ("결함",      True),
     "improve": ("개선 요청",  False),
     "gap":     ("기획 보완",  False),
+    "qa":      ("QA 데이터",  False),   # 잔여 데이터 점검. 우리 쪽 정리 문제라 전달 대상 아님
 }
 DEFAULT_KIND = "defect"
+
+# 같은 영역 안에서 개발 전달 순서를 정한다. 없으면 맨 뒤.
+SEVERITY_RANK = {"치명": 0, "주요": 1, "경미": 2}
+
+TREND_META = {"fixed": "수정됨", "still": "계속 실패", "new": "새로 실패"}
 
 
 def _esc(s):
@@ -59,6 +70,8 @@ def _grouped_dev_items(results):
             groups[a] = []
             order.append(a)
         groups[a].append(r)
+    for a in order:
+        groups[a].sort(key=lambda r: SEVERITY_RANK.get((r.get("severity") or "").strip(), 9))
     return [(a, groups[a]) for a in order]
 
 
@@ -75,7 +88,8 @@ def _flat_dev_items(results):
 def _held_items(results):
     """실패했지만 기획팀이 먼저 판단해야 하는 항목."""
     return [r for r in results
-            if r["status"] == "FAIL" and not KIND_META[_kind_of(r)][1]]
+            if r["status"] == "FAIL" and not KIND_META[_kind_of(r)][1]
+            and _kind_of(r) != "qa"]
 
 
 # 재현 절차에 적을 조작. `expect_*` 는 검증문이라 빼고, `wait`·`screenshot` 은
@@ -104,31 +118,35 @@ def _repro_steps(r):
     기대/실제 줄이 말해주므로, 여기에는 거기까지 가는 길만 남긴다.
     """
     out = []
-    for st in r["steps"]:
-        if st["phase"] == "cleanup":
-            continue
+    test = [st for st in r["steps"] if st["phase"] != "cleanup"]
+    # soft 스텝이 있으면 실패가 여러 개다. 마지막 실패까지 절차를 남긴다
+    last = max((i for i, st in enumerate(test) if st["status"] == "FAIL"), default=len(test) - 1)
+    for st in test[:last + 1]:
         act = st.get("action")
         if act in REPRO_VERBS:
             target = st["label"][len(act):].strip() if act else st["label"]
             out.append({"text": REPRO_VERBS[act].format(target),
                         "failed": st["status"] == "FAIL"})
-        if st["status"] == "FAIL":
-            break
     return out
 
 
 def _actual(r):
-    """실제로 어떻게 나왔는지. 실패 스텝의 메시지가 가장 구체적이다."""
-    for s in r["steps"]:
-        if s["status"] == "FAIL" and s["msg"]:
-            return s["msg"]
+    """실제로 어떻게 나왔는지. 실패 스텝의 메시지가 가장 구체적이다 (soft 면 여러 개)."""
+    msgs = [s["msg"] for s in r["steps"]
+            if s["status"] == "FAIL" and s["msg"] and s["phase"] != "cleanup"]
+    if msgs:
+        return " / ".join(msgs)
     return r["reason"] or "(메시지 없음)"
+
+
+def _trace_note(r):
+    return "`{}` · https://trace.playwright.dev 에 올리면 동작이 재생됨".format(r["trace"])
 
 
 # ---------------------------------------------------------------- 마크다운
 
 def build_works_log(spec, results, out_dir):
-    """웍스에 그대로 붙일 수정 요청 로그.
+    """웍스에 그대로 붙일 미반영 오류 로그.
 
     상세본(개발전달.md)은 근거·재현 절차까지 담아 "참고 자료"처럼 읽힌다. 그대로 올리면
     받는 쪽이 추가 검토 요청으로 받아들인다. 로그는 **할 일 목록**이어야 하므로
@@ -137,11 +155,12 @@ def build_works_log(spec, results, out_dir):
     meta = spec["meta"]
     items = _dev_items(results)
 
-    L = ["[{}] {} 검수 · 수정 요청 {}건".format(
+    # "수정 요청" 으로 쓰면 신규 요청으로 읽혀 결함으로 처리되지 않는다. 기획대로 안 된 것은 오류로 쓴다
+    L = ["[{}] {} 검수 · 기획 미반영 오류 {}건".format(
         datetime.now().strftime("%m/%d"), meta["project"], len(items))]
     if not items:
         L.append("")
-        L.append("수정 요청 없음.")
+        L.append("미반영 오류 없음.")
         path = out_dir / "웍스등록.txt"
         path.write_text("\n".join(L), encoding="utf-8")
         return path
@@ -165,8 +184,10 @@ def _fix_line(r):
 
     없으면 제목으로 대신하되, 제목은 보통 "~되지 않는다" 처럼 기대를 서술한 문장이라
     지시문으로는 약하다. 스펙 단계에서 `fix` 를 적어두는 게 맞다.
+    치명 건은 앞에 [치명] 을 붙여 목록에서 먼저 눈에 띄게 한다.
     """
-    return (r.get("fix") or "").strip() or r["title"]
+    line = (r.get("fix") or "").strip() or r["title"]
+    return "[치명] " + line if (r.get("severity") or "").strip() == "치명" else line
 
 
 def build_dev_md(spec, results, out_dir):
@@ -179,10 +200,10 @@ def build_dev_md(spec, results, out_dir):
     items = _dev_items(results)
     held = _held_items(results)
 
-    L = ["# {} 수정 요청".format(meta["project"]), ""]
+    L = ["# {} 기획 미반영 오류".format(meta["project"]), ""]
     L.append("- 대상: {}".format(meta["base_url"]))
     L.append("- 검수일: {}".format(datetime.now().strftime("%Y-%m-%d")))
-    L.append("- 전체 {}건 중 **수정 요청 {}건**".format(len(results), len(items)))
+    L.append("- 전체 {}건 중 **미반영 오류 {}건**".format(len(results), len(items)))
     L.append("")
 
     if not items:
@@ -200,11 +221,17 @@ def build_dev_md(spec, results, out_dir):
         if area:
             L.append("| 영역 | {} |".format(area))
         L.append("| 케이스 | `{}` |".format(r["id"]))
+        if r.get("severity"):
+            L.append("| 심각도 | {} |".format(r["severity"]))
         if r.get("session"):
             L.append("| 로그인 상태 | {} |".format(r["session"]))
+        if r.get("trend") == "still":
+            L.append("| 지난 검수 | 계속 실패 |")
         L.append("| 기대 | {} |".format(r["requirement"].replace("\n", " ") or "-"))
-        L.append("| 실제 | {} |".format(_actual(r).replace("\n", " ")))
+        L.append("| 실제 | {} |".format(_actual(r).replace("\n", " ").replace("|", "\\|")))
         L.append("| 근거 | {} |".format(r["source"] or "-"))
+        if r.get("trace"):
+            L.append("| 동작 기록 | {} |".format(_trace_note(r)))
         L.append("")
         # 접속만 하면 보이는 건이면 절차를 적을 게 없다. 위의 `대상` 줄과 겹칠 뿐이다.
         steps = _repro_steps(r)
@@ -325,15 +352,32 @@ def _case_body(r, spec_case, spec_path):
         txt = "[{}]".format(extra) if extra else ""
     reason = ('<dt>사유</dt><dd class="reason">{}</dd>'.format(_esc(txt))
               if txt else "")
+    if r.get("flaky"):
+        reason += '<dt>1차 실행</dt><dd class="reason">{}</dd>'.format(_esc(r["flaky"]))
+    if r.get("req"):
+        reason += '<dt>요건 ID</dt><dd class="src">{}</dd>'.format(_esc(", ".join(r["req"])))
+    if r.get("trace"):
+        reason += ('<dt>동작 기록</dt><dd class="src"><a href="{0}">{0}</a> · '
+                   'https://trace.playwright.dev 에 올리면 재생</dd>').format(_esc(r["trace"]))
     return """<dl>
     <dt>검증 요건</dt><dd>{req}</dd>
     <dt>근거</dt><dd class="src">{src}</dd>
     {reason}
   </dl>
-  {gate}{steps}{shots}""".format(
+  {gate}{steps}{signals}{shots}""".format(
         req=_esc(r["requirement"]), src=_esc(r["source"]), reason=reason,
         gate=_gate_block(r, spec_case, spec_path),
-        steps=_steps_html(r), shots=_shots_html(r))
+        steps=_steps_html(r), signals=_signals_html(r), shots=_shots_html(r))
+
+
+def _signals_html(r):
+    """콘솔 · 네트워크 오류. 판정과 무관한 참고 정보라 접어둔다."""
+    sig = r.get("signals") or []
+    if not sig:
+        return ""
+    return ('<details class="sig"><summary>콘솔·네트워크 오류 {}건 (판정과 무관)</summary>'
+            '<ul>{}</ul></details>').format(
+        len(sig), "".join("<li>{}</li>".format(_esc(s)) for s in sig))
 
 
 def _case_block(r, spec_case, spec_path):
@@ -350,6 +394,15 @@ def _case_block(r, spec_case, spec_path):
     # 스펙 하나에 세션이 여럿이면(비회원 · 회원 · 어드민) 어느 로그인 상태로 본 건지 표시한다
     if r.get("session"):
         ktag = '<span class="ktag">{}</span>'.format(_esc(r["session"])) + ktag
+    if r.get("severity"):
+        ktag += '<span class="ktag">{}</span>'.format(_esc(r["severity"]))
+    if r.get("flaky"):
+        ktag += '<span class="ktag ktag-warn">재실행 통과</span>'
+    elif r.get("retried"):
+        ktag += '<span class="ktag">재실행도 같음</span>'
+    if r.get("trend"):
+        ktag += '<span class="ktag trend-{}">{}</span>'.format(
+            r["trend"], _esc(TREND_META[r["trend"]]))
 
     head = ('<span class="badge" style="color:{c};background:{bg}">{l}</span>'
             '<span class="cid">{id}</span><span class="ctitle">{t}</span>'
@@ -391,6 +444,14 @@ def _dev_block(results, held, md_name, log_name, log_text):
             '<li class="{}">{}</li>'.format(
                 "step-fail" if st["failed"] else "", _esc(st["text"]))
             for st in rp) if len(rp) > 1 else ""
+        extra = ""
+        if r.get("severity"):
+            extra += '<dt>심각도</dt><dd>{}</dd>'.format(_esc(r["severity"]))
+        if r.get("trend") == "still":
+            extra += '<dt>지난 검수</dt><dd>계속 실패</dd>'
+        if r.get("trace"):
+            extra += ('<dt>동작 기록</dt><dd class="src"><a href="{0}">{0}</a> · '
+                      'https://trace.playwright.dev 에 올리면 재생</dd>').format(_esc(r["trace"]))
         rows.append("""<article class="devitem">
   <h3><span class="devno">{n}</span>{title}</h3>
   <dl>
@@ -398,13 +459,14 @@ def _dev_block(results, held, md_name, log_name, log_text):
     <dt>실제</dt><dd class="reason">{act}</dd>
     <dt>근거</dt><dd class="src">{src}</dd>
     <dt>케이스</dt><dd class="src">{id}</dd>
+    {extra}
   </dl>
   {repro}
   {shots}
 </article>""".format(
             n=i, title=_esc(_fix_line(r)), req=_esc(r["requirement"]),
             area=('<dt>영역</dt><dd>{}</dd>'.format(_esc(area)) if area else ""),
-            act=_esc(_actual(r)), src=_esc(r["source"]), id=_esc(r["id"]),
+            act=_esc(_actual(r)), src=_esc(r["source"]), id=_esc(r["id"]), extra=extra,
             repro=('<div class="devrepro"><b>재현 절차</b><ol>{}</ol></div>'.format(steps)
                    if steps else ""),
             shots=_shots_html(r)))
@@ -414,7 +476,7 @@ def _dev_block(results, held, md_name, log_name, log_text):
 
     return """<div class="devhead">
   <div>
-    <b>수정 요청 {n}건</b>
+    <b>기획 미반영 오류 {n}건</b>
     <p>아래 그대로 웍스에 올리면 됩니다. 근거·재현 절차는 담지 않았습니다.</p>
   </div>
   <button type="button" id="copybtn" onclick="copyDev()">복사</button>
@@ -427,6 +489,95 @@ def _dev_block(results, held, md_name, log_name, log_text):
 <h2 class="devsub">항목별 근거</h2>
 {inner}""".format(n=len(rows_in), md=_esc(md_name), logf=_esc(log_name),
                   log=_esc(log_text), heldnote=heldnote, inner=inner)
+
+
+# ---------------------------------------------------------------- 요약 블록
+
+COV_ORDER = ("미검증", "미반영", "점검 필요", "미확인", "일부 통과", "미실행", "통과", "제외")
+COV_BAD = ("미검증", "미반영", "점검 필요")
+
+
+def coverage_rows(spec, results):
+    """요건마다 연결된 케이스와 상태. 케이스 -> 근거 말고 요건 -> 케이스 방향으로 본다.
+
+    케이스마다 근거를 붙여도, 기획서 요건 중 케이스가 아예 안 만들어진 것은 리포트 어디에도
+    드러나지 않는다. 그 빈칸을 보이게 하는 게 이 표의 목적이다.
+    """
+    reqs = spec.get("requirements") or []
+    if not reqs:
+        return []
+    linked = {}
+    for c in spec.get("cases", []):
+        for rid in c.get("req") or []:
+            linked.setdefault(rid, []).append(c["id"])
+    by_id = {r["id"]: r for r in results}
+    rows = []
+    for q in reqs:
+        cids = linked.get(q["id"], [])
+        note = ""
+        if q.get("exclude"):
+            st, note = "제외", q["exclude"]
+        elif not cids:
+            st, note = "미검증", "연결된 케이스 없음"
+        else:
+            ss = {by_id[c]["status"] for c in cids if c in by_id}
+            if not ss:
+                st = "미실행"
+            elif "FAIL" in ss:
+                st = "미반영"
+            elif "ERROR" in ss:
+                st = "점검 필요"
+            elif ss == {"PASS"}:
+                st = "통과"
+            elif "PASS" in ss:
+                st, note = "일부 통과", "나머지 케이스는 승인 대기·조건 미충족·차단"
+            else:
+                st, note = "미확인", "승인 대기·조건 미충족·차단"
+        rows.append({"id": q["id"], "text": q.get("text", ""), "source": q.get("source", ""),
+                     "cases": cids, "status": st, "note": note})
+    return rows
+
+
+def _coverage_html(rows, partial):
+    if not rows:
+        return ""
+    cnt = {k: sum(1 for x in rows if x["status"] == k) for k in COV_ORDER}
+    summ = " · ".join("{} {}".format(k, cnt[k]) for k in COV_ORDER if cnt[k])
+    trs = "".join(
+        '<tr class="{cls}"><td class="cid">{id}</td><td>{text}<div class="src">{src}</div></td>'
+        '<td class="cid">{cases}</td><td><b>{st}</b><div class="src">{note}</div></td></tr>'.format(
+            cls="cov-bad" if x["status"] in COV_BAD else "", id=_esc(x["id"]), text=_esc(x["text"]),
+            src=_esc(x["source"]), cases=_esc(", ".join(x["cases"]) or "-"),
+            st=_esc(x["status"]), note=_esc(x["note"]))
+        for x in sorted(rows, key=lambda x: COV_ORDER.index(x["status"])))
+    opened = " open" if any(x["status"] in COV_BAD for x in rows) else ""
+    part = " · 일부 케이스만 실행함" if partial else ""
+    return ('<details class="cov"{o}><summary>요건 커버리지 · 요건 {n}개 · {s}{p}</summary>'
+            '<table><thead><tr><th>ID</th><th>요건</th><th>케이스</th><th>상태</th></tr></thead>'
+            '<tbody>{trs}</tbody></table></details>').format(
+        o=opened, n=len(rows), s=_esc(summ), p=part, trs=trs)
+
+
+def _trend_html(results, prev):
+    if not prev:
+        return ""
+    groups = {k: [r for r in results if r.get("trend") == k] for k in TREND_META}
+    summ = " · ".join("{} {}".format(TREND_META[k], len(v)) for k, v in groups.items())
+    body = "".join(
+        "<p><b>{}</b></p><ul>{}</ul>".format(
+            TREND_META[k], "".join("<li>{} {}</li>".format(_esc(r["id"]), _esc(r["title"])) for r in v))
+        for k, v in groups.items() if v)
+    return ('<details class="pending trend"><summary>지난 실행 대비 · {s}</summary>'
+            '<p class="src">비교 기준: {n}</p>{b}</details>').format(
+        s=_esc(summ), n=_esc(prev["name"]), b=body)
+
+
+def _list_block(cls, title, desc, items):
+    if not items:
+        return ""
+    return ('<details class="pending {c}"><summary>{t}</summary><p>{d}</p>'
+            '<ul>{li}</ul></details>').format(
+        c=cls, t=_esc(title), d=desc, li="".join(items))
 
 
 # ---------------------------------------------------------------- CSS / JS
@@ -493,6 +644,33 @@ header.top .meta code { background:#e9ebef; padding:1px 6px; border-radius:3px;
 .case-FAIL { border-left-color:#c0362c; box-shadow:0 1px 3px rgba(192,54,44,.10); }
 .case-SKIPPED { border-left-color:#d99a00; }
 .case-BLOCKED { border-left-color:#5b4bbd; }
+.case-ERROR { border-left-color:#ea7a2c; }
+.case-NA { border-left-color:#9aa1aa; }
+.chip-ERROR { border-color:#f5c9a6; background:#fff8f2; }
+.chip-ERROR b { color:#9a3412; }
+.chip-ERROR.on b { color:#fff; }
+.ktag-warn { background:#fff1e6; color:#9a3412; }
+.trend-fixed { background:#e7f6ed; color:#0f7b3f; }
+.trend-still { background:#fdecea; color:#c0362c; }
+.trend-new { background:#fdecea; color:#c0362c; font-weight:700; }
+.pending.err { border-left-color:#ea7a2c; }
+.pending.flaky { border-left-color:#d99a00; }
+.pending.sig, .pending.trend { border-left-color:#9aa1aa; }
+.pending > p.src { margin:0 14px 8px; }
+.sig { margin:8px 0 0; font-size:12px; color:#6b7280; }
+.sig > summary { cursor:pointer; }
+.sig ul { margin:4px 0 0; padding-left:20px; word-break:break-all; }
+
+/* 요건 커버리지 */
+.cov { background:#fff; border:1px solid #dcdfe4; border-left:3px solid #16191d;
+       border-radius:6px; margin-bottom:14px; font-size:12.5px; }
+.cov > summary { cursor:pointer; padding:10px 14px; font-weight:700; }
+.cov table { width:calc(100% - 28px); margin:0 14px 12px; border-collapse:collapse; }
+.cov th { text-align:left; color:#8b919a; font-weight:400; border-bottom:1px solid #e3e6ea;
+          padding:4px 8px; }
+.cov td { border-bottom:1px solid #f0f1f3; padding:6px 8px; vertical-align:top; }
+.cov tr.cov-bad td { background:#fff7f6; }
+.cov tr.cov-bad b { color:#c0362c; }
 .case-PASS { background:#fcfcfd; }
 .chead { display:flex; align-items:center; gap:10px; padding:11px 16px;
          list-style:none; }
@@ -747,7 +925,8 @@ DOC = """<!doctype html>
 </body></html>"""
 
 
-def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None):
+def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None,
+                 prev=None, partial=False):
     meta = spec["meta"]
     counts = {k: sum(1 for r in results if r["status"] == k) for k in STATUS_META}
     by_id = {c["id"]: c for c in spec.get("cases", [])}
@@ -761,7 +940,30 @@ def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None):
         '<button class="chip chip-{k}" data-filter="{k}"{dis}>'
         '<b>{n}</b><span>{l}</span></button>'.format(
             k=k, n=counts[k], l=STATUS_META[k][0], dis="" if counts[k] else " disabled")
-        for k in ("FAIL", "PASS", "SKIPPED", "BLOCKED"))
+        for k in CHIP_ORDER if counts[k] or k in ("FAIL", "PASS"))
+
+    def li(r, extra=""):
+        return "<li>{} {}{}</li>".format(_esc(r["id"]), _esc(r["title"]),
+                                         " · " + _esc(extra) if extra else "")
+
+    notices = "".join([
+        _trend_html(results, prev),
+        _list_block("err", "점검 필요 {}건".format(counts["ERROR"]),
+                    "화면 판정까지 가지 못했습니다 (요소 없음 · 시간 초과 · 설정 오류). "
+                    "스크린샷과 동작 기록으로 결함인지 검수 스크립트 문제인지 확인합니다. "
+                    "개발 전달에는 넣지 않았습니다.",
+                    [li(r, r["reason"][:120]) for r in results if r["status"] == "ERROR"]),
+        _list_block("flaky", "재실행으로 통과 {}건".format(sum(1 for r in results if r.get("flaky"))),
+                    "1차 실행에서 실패했다가 다시 돌려 통과했습니다. 반복되면 화면이 불안정한 것입니다.",
+                    [li(r, r["flaky"][:120]) for r in results if r.get("flaky")]),
+        _list_block("sig", "콘솔·네트워크 오류가 난 케이스 {}건".format(
+                        sum(1 for r in results if r.get("signals"))),
+                    "판정과 무관한 참고 정보입니다.",
+                    [li(r, r["signals"][0] + (" 외 {}건".format(len(r["signals"]) - 1)
+                                              if len(r["signals"]) > 1 else ""))
+                     for r in results if r.get("signals")]),
+    ])
+    cov_html = _coverage_html(coverage_rows(spec, results), partial)
 
     warn_html = ""
     if warnings:
@@ -789,7 +991,7 @@ def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None):
         base=_esc(meta["base_url"]),
         dry='<span class="drytag">DRY-RUN (쓰기 없음)</span>' if dry_run else "",
         n_all=len(results), n_dev=len(dev_items),
-        chips=chips, warn=warn_html, pending=pend_html,
+        chips=chips, warn=warn_html, pending=cov_html + notices + pend_html,
         cases="".join(_case_block(r, by_id.get(r["id"]), spec_path) for r in results),
         dev=_dev_block(results, held_items, md_path.name, log_path.name,
                        log_path.read_text(encoding="utf-8")),
