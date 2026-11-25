@@ -73,6 +73,15 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         if path == "/api/count":
             return self._json({"n": len(WRITES)})
+        if path == "/js/sendbird.min.js":
+            # 이름에 blocklist 'send' 가 든 스크립트. 막히면 SB_OK 가 안 생긴다
+            body = b"window.SB_OK = 1;"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path in ("/api/getwrite", "/api/wget"):
             # 레거시 GET 쓰기. 받으면 서버 데이터가 바뀐 것으로 센다
             WRITES.append("GET " + self._what())
@@ -92,6 +101,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"ok": True})
         if path in ("/api/search", "/api/search2", "/api/goods/search"):
             return self._json({"n": 3})
+        if path in ("/api/log", "/api/log2"):
+            # 로그성 POST. ignore_requests 여도 막기는 하므로 여기 오면 안 된다
+            WRITES.append("POST " + path[5:])
+            return self._json({"ok": True})
         self.send_response(404)
         self.end_headers()
 
@@ -184,9 +197,13 @@ def sc_dry():
     ran = expect_status("dry: 쓰기 경로 차단", res, {
         "S1": "BLOCKED", "S2": "BLOCKED", "S3": "ERROR", "S4": "ERROR", "S6": "BLOCKED",
         "S7": "ERROR", "S8": "BLOCKED", "S8b": "PASS", "S9": "PASS", "S10": "ERROR",
-        "S11": "ERROR", "S12": "PASS"})
+        "S11": "ERROR", "S12": "PASS", "S13": "ERROR"})
     no_writes("dry: 서버 쓰기 0", ran, w)
     check("dry: 개발 전달 0건", "미반영 오류 0건" in text(f, "웍스등록.txt"), text(f, "웍스등록.txt")[:80])
+    check("dry: S7 write:false 저장 클릭 사유", has_reason(res, "S7", qa_run.REASON_WRITE_FALSE_SENT),
+          reason_of(res, "S7"))
+    check("dry: S13 케이스 anchor body 는 anchor 없음 (요소를 찾지 못함)",
+          "요소를 찾지 못함" in reason_of(res, "S13"), reason_of(res, "S13"))
 
 
 @scenario
@@ -216,7 +233,9 @@ def sc_approved():
 def sc_allowpost():
     code, f, meta, res, out, w = run("allowpost_off", "--dry-run")
     expect_status("allow_post 없음: POST 조회 차단", res, {"A1": "ERROR"})
-    check("allow_post 없음: 사유에 allow_post 안내", has_reason(res, "A1", qa_run.REASON_REQUEST_BLOCKED),
+    # A1 은 write:false 로 둔 조회 버튼이라 write:false 전용 사유가 난다. 설정 키(meta.allow_post)는 권하지 않는다
+    check("allow_post 없음: 사유가 write:false 전용 · 'meta.allow_post' 없음",
+          has_reason(res, "A1", qa_run.REASON_WRITE_FALSE_SENT) and "meta.allow_post" not in reason_of(res, "A1"),
           reason_of(res, "A1"))
     code, f, meta, res, out, w = run("allowpost_on", "--dry-run")
     expect_status("allow_post 있음: POST 조회 통과", res, {"A2": "PASS"})
@@ -238,9 +257,20 @@ def sc_getw():
     code, f, meta, res, out, w = run("getw", "--dry-run", "--no-retry")
     ran = expect_status("getw: blocklist 주소 링크는 차단", res, {"G1": "PASS", "G2": "ERROR", "G3": "PASS"})
     check("getw: blocklist 에 적은 GET 쓰기 0", ran and not any("withdraw" in x for x in w), str(w))
+    check("getw: G2 사유에 blocklist 'withdraw'", "blocklist 'withdraw'" in reason_of(res, "G2")
+          and has_reason(res, "G2", qa_run.REASON_REQUEST_BLOCKED), reason_of(res, "G2"))
     check("getw: 막지 못한 GET 쓰기는 의심 신호", all(res.get(c, {}).get("get_suspects") for c in ("G1", "G3")),
           str({c: res.get(c, {}).get("get_suspects") for c in ("G1", "G3")}))
     check("getw: 리포트 할 일에 'GET 쓰기 의심'", "GET 쓰기 의심" in text(f, "리포트.html"))
+    # 신호 범위 (R3-09): 선택 변경 · 1초 뒤 · 다른 호스트 GET 도 의심 목록에, 무시 목록 경로는 없음
+    expect_status("getw: 선택 · 지연 · 다른 호스트 GET 케이스", res, {"G4": "PASS", "G5": "PASS", "G6": "PASS",
+                                                              "G7": "PASS"})
+    sus = {c: " ".join(res.get(c, {}).get("get_suspects") or []) for c in ("G4", "G5", "G6", "G7")}
+    check("getw: select onchange GET(status_update) 의심", "status_update" in sus["G4"], sus["G4"])
+    check("getw: 클릭 1초 뒤 GET(delay_toggle) 의심", "delay_toggle" in sus["G5"], sus["G5"])
+    check("getw: 다른 호스트 GET(remote_save) 의심", "remote_save" in sus["G6"] and "localhost" in sus["G6"],
+          sus["G6"])
+    check("getw: 무시 목록 경로 GET 은 신호 없음", not sus["G7"], sus["G7"])
 
 
 @scenario
@@ -338,6 +368,84 @@ def sc_boundary():
     expect_status("boundary: 앞 문서의 늦은 요청 · 알럿이 다음 케이스에 섞이지 않음", res,
                   {"BK1": "PASS", "BK2": "PASS", "BA1": "PASS", "BA2": "PASS"})
     check("boundary: 서버 쓰기 0", not w, str(w))
+
+
+@scenario
+def sc_bypass():
+    code, f, meta, res, out, w = run("bypass", "--no-retry")
+    ran = expect_status("bypass: 아이콘 셀렉터 · Enter · onclick div 안 아이콘은 내장 blocklist 로 차단", res,
+                        {"BY1": "BLOCKED", "BY2": "BLOCKED", "BY3": "BLOCKED", "BY0": "PASS"})
+    for cid in ("BY1", "BY2", "BY3"):
+        check("bypass: {} 사유에 text*=발송".format(cid),
+              has_reason(res, cid, qa_run.REASON_RUNTIME_BLOCKLIST) and "text*=발송" in reason_of(res, cid),
+              reason_of(res, cid))
+    check("bypass: 서버 POST send_* 0", ran and not any("send" in x for x in w), str(w))
+    code, f, meta, res, out, w = run("bypass_off", "--no-retry")
+    ran = expect_status("bypass: blocklist_off 로 풀면 세 경로 모두 실행", res,
+                        {"BY1": "PASS", "BY2": "PASS", "BY3": "PASS", "BY0": "PASS"})
+    check("bypass: 풀었을 때 서버 쓰기 경로마다 1회",
+          ran and sorted(w) == ["POST send_div", "POST send_enter", "POST send_icon"], str(w))
+
+
+@scenario
+def sc_wfalse():
+    code, f, meta, res, out, w = run("wfalse", "--dry-run", "--no-retry")
+    ran = expect_status("wfalse: write:false 빈 폼 제출이 쓰기 요청을 보내면 점검 필요", res, {"WF1": "ERROR"})
+    rs = reason_of(res, "WF1")
+    check("wfalse: 사유에 'write:false' · 'meta.allow_post' 없음",
+          has_reason(res, "WF1", qa_run.REASON_WRITE_FALSE_SENT) and "write:false" in rs and "meta.allow_post" not in rs,
+          rs)
+    check("wfalse: 사유의 주소는 경로부터 (검수 주소 앞부분 뺌)", "POST /api/write?what=apply" in rs, rs)
+    no_writes("wfalse: 서버 쓰기 0", ran, w)
+    rep = text(f, "리포트.html") + text(f, "개발전달.md") + text(f, "웍스등록.txt")
+    check("wfalse: 리포트 전체에 'meta.allow_post' 0", f is not None and "meta.allow_post" not in rep)
+
+
+@scenario
+def sc_ignore():
+    code, f, meta, res, out, w = run("ignore", "--dry-run", "--no-retry")
+    ran = expect_status("ignore: ignore_requests 경로 · 호스트 항목은 막되 통과, 다른 호스트 같은 경로는 점검 필요",
+                        res, {"IG1": "PASS", "IG2": "PASS", "IG3": "ERROR"})
+    check("ignore: IG3 사유는 분류 안내 · 다른 호스트는 주소 전체",
+          has_reason(res, "IG3", qa_run.REASON_REQUEST_BLOCKED) and "POST http://localhost:" in reason_of(res, "IG3"),
+          reason_of(res, "IG3"))
+    sig = " ".join(res.get("IG1", {}).get("signals") or [])
+    check("ignore: IG1 은 막았다는 신호만 남김", "판정 무관" in sig, sig)
+    no_writes("ignore: 무시한 요청도 서버에 안 감 (쓰기 0)", ran, w)
+
+
+@scenario
+def sc_blres():
+    code, f, meta, res, out, w = run("blres", "--dry-run", "--no-retry")
+    ran = expect_status("blres: blocklist 'send' 는 스크립트에 안 걸림 · 'del' GET 링크는 막힘", res,
+                        {"BL1": "PASS", "BL2": "ERROR"})
+    check("blres: BL2 사유에 blocklist 'del'", "blocklist 'del'" in reason_of(res, "BL2"), reason_of(res, "BL2"))
+    check("blres: del 링크 GET 서버 0", ran and not any("del_item" in x for x in w), str(w))
+
+
+@scenario
+def sc_explore():
+    """탐색 헬퍼 guarded_page 를 이 프로세스에서 연다 (브라우저 1개, 러너 실행 없음)."""
+    del WRITES[:]
+    spec = WORK["specs"] / "explore.json"
+    marks = {}
+    try:
+        with qa_run.guarded_page(spec, headed=False) as page:
+            page.goto(WORK["base"] + "/b2.html", wait_until="domcontentloaded")
+            for sel in ("#xsave", "#xdel", "#xsendget"):
+                page.evaluate("() => { document.getElementById('marker').textContent = 'none'; }")
+                page.click(sel)
+                page.wait_for_timeout(600)
+                marks[sel] = page.inner_text("#marker")
+    except Exception as e:
+        check("explore: 헬퍼로 페이지 열기", False, str(e)[:200])
+        return
+    check("explore: 저장 POST 는 막힘", marks.get("#xsave") == "blocked", str(marks))
+    check("explore: 삭제 확인창은 취소됨", marks.get("#xdel") == "cancelled", str(marks))
+    check("explore: 내장 blocklist 글자(발송) 버튼 클릭은 막힘", marks.get("#xsendget") == "none", str(marks))
+    check("explore: 서버 쓰기 0 (GET 발송 포함)", not WRITES, str(WRITES))
+    out = WORK["tmp"] / "output"
+    check("explore: 결과 폴더를 만들지 않음", not out.exists() or not any(out.glob("rg_explore_*")))
 
 
 @scenario
@@ -502,8 +610,8 @@ def sc_bat():
 
 
 ORDER = ["dry", "live", "block", "approved", "allowpost", "confirm", "getw", "late", "lateok", "popup",
-         "race", "absence", "dlg", "allerr", "popsel", "boundary", "trace", "gate", "sess", "probe", "flaky", "trend",
-         "shared", "smoke", "bat"]
+         "race", "absence", "dlg", "allerr", "popsel", "boundary", "bypass", "wfalse", "ignore", "blres", "explore",
+         "trace", "gate", "sess", "probe", "flaky", "trend", "shared", "smoke", "bat"]
 
 
 def main():

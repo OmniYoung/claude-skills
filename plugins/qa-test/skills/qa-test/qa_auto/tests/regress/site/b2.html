@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>운영 쓰기 안전망 점검</title>
+<!-- 글자 아닌 blocklist 'send' 가 스크립트 파일 이름에 걸리면 안 된다 -->
+<script src="/js/sendbird.min.js"></script>
+</head>
+<body>
+<h1 id="title">안전망 점검</h1>
+<div id="marker">none</div>
+<!-- 내장 blocklist 우회: 버튼 안 아이콘 · Enter · onclick 을 단 div 안 아이콘. 대조군은 '목록' -->
+<button id="send"><span class="ico" style="display:inline-block;width:10px;height:10px;background:#888"></span>알림톡 발송</button>
+<button id="send2">알림톡 발송</button>
+<div id="sdiv" onclick="post('send_div')" style="display:inline-block;padding:4px;border:1px solid #ccc"><span class="ico" style="display:inline-block;width:10px;height:10px;background:#888"></span> 문자 발송</div>
+<button id="list"><span class="ico" style="display:inline-block;width:10px;height:10px;background:#888"></span>목록</button>
+<!-- GET 쓰기 의심: 선택 변경 · 1초 뒤 · 다른 호스트 · 무시 목록 경로 -->
+<select id="st"><option value="1">대기</option><option value="2">진행</option></select>
+<button id="lazyget">보기</button>
+<button id="xget">외부</button>
+<button id="statget">통계</button>
+<a id="rmlink" href="/api/wget?what=del_item">항목 정리</a>
+<!-- 입력 검증 누락: 빈 폼인데 알럿 없이 바로 제출 요청 -->
+<form id="apply"><input name="name"><button id="submit" type="button">신청하기</button></form>
+<!-- ignore_requests: 검수 사이트 로그 · 다른 호스트 로그 -->
+<button id="logbtn">기록 A</button>
+<button id="xlog2">기록 B</button>
+<button id="xlog">기록 C</button>
+<!-- 탐색 헬퍼: 저장 POST · 확인창 삭제 · GET 으로 보내는 발송 -->
+<button id="xsave">저장</button>
+<button id="xdel">삭제</button>
+<button id="xsendget">알림톡 발송</button>
+<script>
+var X = 'http://localhost:' + location.port;
+function mark(t) { document.getElementById('marker').textContent = t; }
+function post(what) {
+  return fetch('/api/write?what=' + what, {method: 'POST'})
+    .then(function (r) { if (r.ok) mark(what); })
+    .catch(function () { mark('blocked'); });
+}
+function get(u) { return fetch(u).then(function () { mark('got'); }).catch(function () {}); }
+function postTo(u) { return fetch(u, {method: 'POST', body: 'e=1'}).then(function () { mark('logged'); }).catch(function () {}); }
+document.getElementById('send').onclick = function () { post('send_icon'); };
+document.getElementById('send2').onclick = function () { post('send_enter'); };
+document.getElementById('list').onclick = function () { mark('list'); };
+document.getElementById('st').onchange = function () { get('/api/wget?what=status_update'); };
+document.getElementById('lazyget').onclick = function () {
+  setTimeout(function () { get('/api/wget?what=delay_toggle'); }, 1000);
+};
+document.getElementById('xget').onclick = function () { get(X + '/api/wget?what=remote_save'); };
+document.getElementById('statget').onclick = function () { get('/api/stat/update?x=1'); };
+document.getElementById('submit').onclick = function () { post('apply'); };
+document.getElementById('logbtn').onclick = function () { postTo('/api/log'); };
+document.getElementById('xlog2').onclick = function () { postTo(X + '/api/log2'); };
+document.getElementById('xlog').onclick = function () { postTo(X + '/api/log'); };
+document.getElementById('xsave').onclick = function () { post('xsave'); };
+document.getElementById('xdel').onclick = function () {
+  if (confirm('삭제하시겠습니까?')) post('xdel'); else mark('cancelled');
+};
+document.getElementById('xsendget').onclick = function () { get('/api/wget?what=send_get'); };
+</script>
+</body></html>

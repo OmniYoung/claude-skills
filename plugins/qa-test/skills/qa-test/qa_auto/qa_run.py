@@ -38,6 +38,7 @@ import pathlib
 import re
 import sys
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -80,7 +81,7 @@ from gates import (ALL_ACTIONS, SAFE_METHODS, is_write_step, static_block_hit,
                    runtime_block_hit, runtime_write_hint, site_of, post_allowed,
                    text_mismatch, count_mismatch, is_absence_check, norm,
                    spec_errors, spec_warnings, effective_blocklist, url_block_hit,
-                   ignored_request, get_write_suspect,
+                   ignored_request, get_write_suspect, NO_ANCHORS, _text_pattern,
                    W_QA_PREFIX, W_RESIDUE, W_SELECTOR_UPDATE, W_NA_STREAK,
                    BLOCK_BLOCKLIST, BLOCK_UNDECLARED, BLOCK_NO_CLEANUP, BLOCK_FIRST_GOTO,
                    BLOCK_RESIDUE_WRITE)
@@ -121,6 +122,23 @@ RERUN = ("FAIL", "ERROR", "FLAKY")
 # 이 조작 뒤에만 알럿 기록을 비운다. 판정 · 대기 스텝에서 비우면 직전 조작의 알럿을 놓친다.
 CLEARS_DIALOGS = {"goto", "click", "dblclick", "press", "fill", "type", "select",
                   "check", "uncheck", "upload", "hover", "download"}
+
+# 누르기 직전 읽는 화면 글자. own = 요소 자신, up = 그 요소를 감싼 버튼 · 링크(+ withForm 이면 속한 폼의
+# 제출 버튼). up 은 blocklist 대조에만 쓴다. body · html 은 글자를 읽지 않는다 (포커스가 없을 때의 Enter)
+GUARD_TEXTS_JS = """(e, withForm) => {
+  if (e === document.body || e === document.documentElement) return {own: [], up: []};
+  const r = x => [x.innerText || '', x.value || '', x.getAttribute('aria-label') || '', x.getAttribute('title') || ''];
+  const up = [];
+  const b = e.closest('button,a,[role=button],input[type=submit],input[type=button],label,[onclick]');
+  if (b && b !== e) up.push(...r(b));
+  if (withForm && e.form) {
+    e.form.querySelectorAll('button:not([type]),button[type=submit],input[type=submit],input[type=image]')
+      .forEach(x => up.push(...r(x)));
+  }
+  return {own: r(e), up: up};
+}"""
+# 요소를 누르는 효과가 있는 키 (press). 이 키만 blocklist 를 본다
+ACTIVATE_KEYS = ("enter", "numpadenter", "space", " ")
 
 
 def _expand_str(s, qa_prefix, run_id):
@@ -327,8 +345,12 @@ REASON_RUNTIME_WRITE = ("버튼 글자 '{shown}' 에 '{hint}' 이 있어 쓰기 
 INTERFERE_REQUEST = "요청 차단"     # runner.interfered 에 넣는 값. REASON_INTERFERED 의 {what} 에 들어간다
 INTERFERE_DIALOG = "확인창 취소"
 INTERFERE_POPUP = "다른 창 요청 차단"   # 같은 세션에서 열린 팝업의 쓰기 요청을 막음
-REASON_REQUEST_BLOCKED = ("서버 요청을 막음: {} - 쓰기 승인된 케이스가 아님. 조회용 POST 면 meta.allow_post, "
-                          "로그성 요청이면 meta.ignore_requests 에 경로를 적는다")
+# 막힌 요청 사유에는 설정 키를 적지 않는다. 키를 보고 쓰기 주소를 allow_post 에 넣으면 dry-run 이 운영에 쓴다.
+# 분류(조회 · 로그 · 실제 쓰기)는 SKILL 2단계 절차로 한다. {} 는 "POST /경로" (검수 주소 앞부분은 뺌)
+REASON_REQUEST_BLOCKED = "안전망이 서버 요청을 막음: {}. 조회 · 로그 · 실제 쓰기 중 무엇인지 분류가 필요합니다."
+# write:false 로 둔 클릭 직후 쓰기 요청을 막았을 때 (빈 폼 제출 검증 케이스 등). 상태는 점검 필요(ERROR)
+REASON_WRITE_FALSE_SENT = ("write:false 로 둔 버튼이 서버 쓰기 요청을 보냄: {} - 입력 검증 누락(결함 후보)이거나 "
+                           "write:false 판단 오류. allow_post 대상 아님")
 REASON_GUARD_ERROR = "안전망 처리 오류로 막음: {} {}"
 REASON_DIALOG_DISMISSED = ("확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 문구만 확인하려면 "
                            "다음 스텝에 expect_dialog 를 둔다")
@@ -422,12 +444,14 @@ class Runner:
         self.shots = []
         self.files = {}   # download 로 받은 파일
         self.signals = []  # 케이스 하나 동안 난 JS 오류 · 콘솔 오류 · 실패한 요청 (참고용)
-        self.get_suspects = []     # 클릭 직후 나간 GET 쓰기 의심 주소 (막지 못함, 확인 필요)
+        self.get_suspects = []     # 조작 뒤 나간 GET 쓰기 의심 주소 (막지 못함, 확인 필요)
         # 네트워크 안전망 상태. 승인된 쓰기 케이스의 첫 goto 뒤부터 cleanup 까지만 allow_writes 가 켜진다
         self.allow_writes = False
         self.js_guard = False      # expect_js 평가 중에는 승인 케이스여도 서버 쓰기를 막는다
         self.step_write = False    # 확인창을 수락할 수 있는 구간인지 (쓰기 스텝부터 다음 조작 전까지)
-        self.in_click = False      # 클릭 · 키 입력 직후 구간. GET 쓰기 의심 신호를 이때만 모은다
+        # GET 쓰기 의심 신호를 모으는 구간. 조작 스텝(클릭 · 입력 · 선택 · 다운로드 등)이 시작될 때 켜고
+        # 다음 goto 시작 · 케이스 시작 때만 끈다 (지연 · 디바운스 GET 도 잡히게)
+        self.watch_get = False
         self.blocked = []          # 막은 요청 (판정에 영향). 스텝 판정 때 비운다
         self.blocked_log = []      # 이 케이스에서 막은 요청 전부 (사유에 싣는다)
         self.interfered = set()    # 이 케이스에서 막은 것 ("요청 차단" · "확인창 취소")
@@ -466,8 +490,9 @@ class Runner:
             url = request.url
             if url.startswith(("data:", "blob:", "file:")):
                 return route.continue_()
-            # 기획자가 적어 둔 주소 패턴은 메서드 · 승인과 무관하게 막는다 (GET 쓰기 대비)
-            hit = url_block_hit(url, self.blocklist)
+            # 기획자가 적어 둔 주소 패턴은 메서드 · 승인과 무관하게 막는다 (GET 쓰기 대비).
+            # 스크립트 · 스타일 · 글꼴 파일은 대조하지 않는다 (짧은 단어가 파일 이름에 걸려 화면이 깨지는 것 방지)
+            hit = url_block_hit(url, self.blocklist, request.resource_type)
             if hit:
                 return self._block(route, method, url, "blocklist '{}'".format(hit))
             own = self._from_current_page(request)
@@ -478,14 +503,16 @@ class Runner:
                 # 같은 세션에서 연 팝업(선택 팝업 등)의 쓰기 요청을 막으면 부모 화면 흐름도 달라진다.
                 # 막은 것 자체로 실패시키지는 않고, 이후 판정 실패를 개발 전달로 보내지 않게만 한다
                 if (method not in SAFE_METHODS and self._same_session(request)
-                        and not ignored_request(url, self.ignore_requests)):
-                    line = "{} {} (다른 창)".format(method, url[:160])
+                        and not ignored_request(url, self.ignore_requests, self.base_site)):
+                    line = "{} {} (다른 창)".format(method, self._short(url))
                     if line not in self.blocked_log:
                         self.blocked_log.append(line)
                     self.interfered.add(INTERFERE_POPUP)
                 return
             if method in SAFE_METHODS:
-                if self.in_click and not self.allow_writes and site_of(url) == self.base_site:
+                # 다른 사이트(클라우드 API 게이트웨이 등)로 가는 GET 쓰기도 신호로 남긴다. 분석 도구는 뺀다
+                if (self.watch_get and not self.allow_writes
+                        and not ignored_request(url, self.ignore_requests, self.base_site)):
                     word = get_write_suspect(url)
                     if word and request.resource_type in ("document", "xhr", "fetch", "image",
                                                           "ping", "other"):
@@ -495,7 +522,7 @@ class Runner:
                 return route.continue_()
             if self.allow_writes and not self.js_guard and own:
                 return route.continue_()
-            if not self.js_guard and post_allowed(method, url, self.allow_post):
+            if not self.js_guard and post_allowed(method, url, self.allow_post, self.base_site):
                 return route.continue_()
             self._block(route, method, url, "")
         except Exception:
@@ -513,8 +540,8 @@ class Runner:
     def _block(self, route, method, url, why):
         """요청을 막고 기록한다. 분석 · 로그 요청(ignore)은 막기만 하고 판정에는 쓰지 않는다."""
         route.abort("blockedbyclient")
-        line = "{} {}{}".format(method, url[:160], " ({})".format(why) if why else "")
-        if ignored_request(url, self.ignore_requests):
+        line = "{} {}{}".format(method, self._short(url), " ({})".format(why) if why else "")
+        if ignored_request(url, self.ignore_requests, self.base_site):
             self._signal("분석 · 로그 요청 차단 (판정 무관): {}".format(line))
             return
         if line not in self.blocked:
@@ -522,6 +549,13 @@ class Runner:
         if line not in self.blocked_log:
             self.blocked_log.append(line)
         self.interfered.add(INTERFERE_REQUEST)
+
+    def _short(self, url):
+        """사유에 싣는 주소. 검수 주소와 같은 출처면 경로부터(allow_post 에 적는 형식), 다른 곳이면 주소 전체."""
+        m = re.match(r"^[a-z][a-z0-9+.-]*://[^/?#]+", self.base_url or "", re.I)
+        if m and url.startswith(m.group(0) + "/"):
+            url = url[len(m.group(0)):]
+        return url[:160]
 
     def check_blocked(self):
         """막은 요청이 있으면 스텝을 점검 필요로 끝낸다."""
@@ -887,7 +921,12 @@ class Runner:
         return None
 
     def _anchor_of(self, step):
-        return step.get("anchor") or self.anchor
+        """스텝 anchor, 없으면 케이스 anchor. body · html · :root 는 늘 보여 기준이 못 되므로 anchor 없음으로 친다
+        (셀렉터가 낡은 '요소 없음' 이 미노출 결함 FAIL 로 바뀌지 않게)."""
+        a = step.get("anchor") or self.anchor
+        if a and str(a).strip().lower() in NO_ANCHORS:
+            return None
+        return a
 
     def _anchor_visible(self, step, timeout):
         """anchor 가 보일 때까지 기다린다. 없으면 False."""
@@ -930,11 +969,13 @@ class Runner:
         loc.click(trial=True, timeout=timeout)
         h = loc.element_handle(timeout=timeout)
         try:
-            texts = h.evaluate("""e => [e.innerText || '', e.value || '',
-                e.getAttribute('aria-label') || '', e.getAttribute('title') || '']""")
+            got = h.evaluate(GUARD_TEXTS_JS, False)
+            texts, up = got["own"], got["up"]
         except Exception:
-            texts = []
-        hit = runtime_block_hit(texts, self.blocklist)
+            texts, up = [], []
+        # blocklist 는 그 요소를 감싼 버튼 · 링크 글자까지 본다 ("#send .ico" 처럼 버튼 안 아이콘을 누르는 셀렉터).
+        # 쓰기 힌트는 요소 자신의 글자만 본다 (행 · 카드 클릭이 안에 든 글자로 쓰기 판정되지 않게)
+        hit = runtime_block_hit(texts + up, self.blocklist)
         if hit:
             raise WriteBlocked(REASON_RUNTIME_BLOCKLIST.format(hit), BLOCK_BLOCKLIST)
         if "write" in step:
@@ -945,6 +986,34 @@ class Runner:
         if hint and not self.allow_writes:
             shown = norm(" ".join(t for t in texts if t))[:40]
             raise WriteBlocked(REASON_RUNTIME_WRITE.format(shown=shown, hint=hint), BLOCK_UNDECLARED)
+        return h
+
+    def _guard_press(self, sel, key, timeout):
+        """Enter · Space 를 누르기 전에 blocklist 를 본다. 누를 요소 핸들을 돌려준다 (selector 없으면 None).
+
+        입력칸에서 Enter 를 치면 폼이 제출되고, 버튼에 포커스가 있으면 Enter · Space 가 그 버튼을 누른다.
+        그래서 대상(selector 가 없으면 지금 포커스된 요소)과 그것을 감싼 버튼 · 링크, 속한 폼의 제출 버튼
+        글자를 blocklist 에 대조한다. 걸리면 누르지 않고 BLOCKED. 읽은 요소 그대로 누른다.
+        """
+        h = self.page.locator(sel).first.element_handle(timeout=timeout) if sel else None
+        if key.rsplit("+", 1)[-1].lower() not in ACTIVATE_KEYS:
+            return h
+        target = h
+        if target is None:
+            try:
+                target = self.page.evaluate_handle("document.activeElement").as_element()
+            except Exception:
+                target = None
+        texts = []
+        if target is not None:
+            try:
+                got = target.evaluate(GUARD_TEXTS_JS, True)
+                texts = got["own"] + got["up"]
+            except Exception:
+                texts = []
+        hit = runtime_block_hit(texts, self.blocklist)
+        if hit:
+            raise WriteBlocked(REASON_RUNTIME_BLOCKLIST.format(hit), BLOCK_BLOCKLIST)
         return h
 
     def _after_nav(self, before):
@@ -972,6 +1041,11 @@ class Runner:
         self.check_blocked()
         if action in CLEARS_DIALOGS:
             self.dialogs = []
+        # GET 쓰기 의심 신호: 조작이 시작되면 켜고 다음 goto 까지 둔다 (늦게 · 다른 사이트로 나가는 GET 포함)
+        if action == "goto":
+            self.watch_get = False
+        elif action in INTERACTION_ACTIONS or action == "download":
+            self.watch_get = True
         before = self.page.url
 
         if action == "goto":
@@ -999,7 +1073,6 @@ class Runner:
                 got.append(d)
             self.page.on("download", on_dl)
             try:
-                self.in_click = True
                 h.click(timeout=step.get("click_timeout", 10000))
                 end = time.time() + step.get("timeout", 120000) / 1000.0
                 while not got:
@@ -1010,7 +1083,6 @@ class Runner:
                             step.get("timeout", 120000) // 1000), timeout=True)
                     self.page.wait_for_timeout(500)
             finally:
-                self.in_click = False
                 self.page.remove_listener("download", on_dl)
             dl = got[0]
             name = step.get("save_as") or dl.suggested_filename or "download"
@@ -1057,31 +1129,29 @@ class Runner:
 
         elif action in ("click", "dblclick"):
             h = self._guard_click(step, sel, timeout)
-            self.in_click = True
-            try:
-                if action == "click":
-                    h.click(timeout=timeout)
-                    self.page.wait_for_timeout(500)
-                else:
-                    # 인라인 편집은 보통 더블클릭으로 input 이 생긴다
-                    h.dblclick(timeout=timeout)
-                    self.page.wait_for_timeout(400)
-                self._after_nav(before)
-            finally:
-                self.in_click = False
+            if action == "click":
+                h.click(timeout=timeout)
+                self.page.wait_for_timeout(500)
+            else:
+                # 인라인 편집은 보통 더블클릭으로 input 이 생긴다
+                h.dblclick(timeout=timeout)
+                self.page.wait_for_timeout(400)
+            # 조회용이라 write:false 로 둔 버튼이 쓰기 요청을 보냈다. 빈 폼 제출 검증 케이스면 검증 누락 후보다.
+            # 요청 분류(allow_post)로 풀 문제가 아니므로 일반 차단 사유와 나눠 적는다
+            if step.get("write") is False and self.blocked:
+                lines, self.blocked = self.blocked, []
+                raise StepFailure(REASON_WRITE_FALSE_SENT.format(" / ".join(lines[:3])))
+            self._after_nav(before)
 
         elif action == "press":
             key = step["key"]
-            self.in_click = True
-            try:
-                if sel:
-                    self.page.press(sel, key, timeout=timeout)
-                else:
-                    self.page.keyboard.press(key)
-                self.page.wait_for_timeout(400)
-                self._after_nav(before)
-            finally:
-                self.in_click = False
+            h = self._guard_press(sel, key, timeout)
+            if h is not None:
+                h.press(key, timeout=timeout)
+            else:
+                self.page.keyboard.press(key)
+            self.page.wait_for_timeout(400)
+            self._after_nav(before)
 
         elif action == "type":
             # fill 과 달리 기존 값을 지우지 않고 키 입력을 흉내낸다.
@@ -1564,6 +1634,7 @@ def run_case(runner, case, blocklist, dry_run):
     runner.blocklist = eff_block
     runner.allow_writes = False
     runner.step_write = False
+    runner.watch_get = False
     soft_fails = []
     state = {"failed_step": None, "opened": False}
     qa_prefix = runner.qa_prefix
@@ -1575,8 +1646,9 @@ def run_case(runner, case, blocklist, dry_run):
             write = is_write_step(step)
             if step.get("precondition") and write:
                 raise StepFailure(REASON_PRE_WRITE.format(label))
-            # 확인창은 쓰기 스텝부터 다음 조작이 시작될 때까지 수락한다 (늦게 뜨는 확인창 대비)
-            if write or act in INTERACTION_ACTIONS or act == "goto":
+            # 확인창은 쓰기 스텝부터 다음 조작이 시작될 때까지 수락한다 (늦게 뜨는 확인창 대비).
+            # download 도 조작이다. 쓰기 스텝 뒤 내보내기 버튼이 띄운 확인창까지 수락하지 않게 여기서 끊는다
+            if write or act in INTERACTION_ACTIONS or act in ("goto", "download"):
                 runner.step_write = write
             try:
                 runner.run(step, cid, i)
@@ -2368,6 +2440,79 @@ def _context_args(conf, name, meta, spec_path, workspace):
     if conf.get("user_agent"):
         args["user_agent"] = conf["user_agent"]
     return args
+
+
+# 탐색 페이지에서 화면 글자가 blocklist 에 걸리는 요소의 클릭을 막는다 (캡처 단계에서 먼저 잡음).
+# 러너의 _guard_click 과 같은 기준: 요소 자신과 그것을 감싼 버튼 · 링크의 글자
+GUARD_CLICK_INIT_JS = """(() => {
+  const PATS = %s;
+  const norm = s => String(s || '').replace(/\\s+/g, ' ').trim();
+  const read = x => [x.innerText, x.value, x.getAttribute('aria-label'), x.getAttribute('title')].map(norm).filter(Boolean);
+  const hit = el => {
+    const b = el.closest('button,a,[role=button],input[type=submit],input[type=button],label,[onclick]');
+    const ts = read(el).concat(b && b !== el ? read(b) : []);
+    return PATS.find(([k, n]) => n && ts.some(t => k === 'exact' ? t === n : t.includes(n)));
+  };
+  document.addEventListener('click', ev => {
+    const el = ev.target instanceof Element ? ev.target : null;
+    const p = el && el !== document.body && hit(el);
+    if (p) {
+      ev.preventDefault(); ev.stopImmediatePropagation();
+      console.warn('[qa-test] blocklist 버튼 클릭을 막음: ' + p[1]);
+    }
+  }, true);
+})();"""
+
+
+@contextmanager
+def guarded_page(spec_path, headed=True, session=""):
+    """셀렉터 매핑(2단계) 때 운영 화면을 직접 열어 볼 페이지. 러너 실행과 같은 안전망을 건다.
+
+        with guarded_page("<기획_폴더>/qa_auto/specs/x.json") as page:
+            page.goto("https://...")
+
+    - 스펙의 세션(auth · cookies · user_agent)으로 연다. session 으로 meta.sessions 의 이름을 고른다.
+    - 서버로 가는 쓰기 요청(POST · PUT · DELETE 등)은 막는다 (meta.allow_post 의 조회 POST 만 통과).
+    - 확인창(confirm · prompt)은 모두 취소하고, 알럿은 닫는다.
+    - 스펙 blocklist 의 주소 패턴은 메서드와 무관하게 막고, 스펙 blocklist 와 내장 blocklist(발송 · 결제 ·
+      발주 · 일괄삭제)의 화면 글자에 걸리는 버튼은 클릭을 막는다.
+    - 막지 못하는 것은 러너와 같다 (blocklist 에 없는 GET 쓰기, 웹소켓). 팝업 창의 요청은 막힌다.
+    결과 폴더 · 스크린샷은 만들지 않는다.
+    """
+    spec_path = Path(spec_path).resolve()
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    meta = spec["meta"]
+    workspace = resolve_spec_workspace(spec_path)
+    sessions = {"": {k: meta[k] for k in SESSION_KEYS if k in meta}}
+    sessions.update(meta.get("sessions") or {})
+    if session not in sessions:
+        raise ValueError("meta.sessions 에 없는 session: {}".format(session))
+    conf = sessions[session]
+    args = _context_args(conf, session, meta, spec_path, workspace)
+    # 탐색은 승인 케이스가 아니므로 meta.blocklist_off 로 푼 항목도 막는다
+    blocklist = effective_blocklist(spec.get("blocklist", []), True)
+    pats = []
+    for p in blocklist:
+        tp = _text_pattern(p) or ("exact", norm(p))
+        pats.append(list(tp))
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=not headed)
+        try:
+            ctx = browser.new_context(**args)
+            if conf.get("cookies"):
+                ctx.add_cookies(load_cookies(spec_path, conf["cookies"], workspace))
+            ctx.add_init_script(GUARD_CLICK_INIT_JS % json.dumps(pats, ensure_ascii=False))
+            page = ctx.new_page()
+            runner = Runner(page, spec, spec_path, None, workspace)
+            runner.blocklist = blocklist
+            runner.guard_context(ctx)
+            ctx.on("page", runner.on_new_page)
+            yield page
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 # -- 메인 ------------------------------------------------------

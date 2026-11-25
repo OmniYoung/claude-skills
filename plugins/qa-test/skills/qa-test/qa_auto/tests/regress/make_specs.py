@@ -330,6 +330,68 @@ SPECS["flaky"]["cases"].append(
          [G("retry.html"), {"action": "expect_text", "selector": "#v", "equals": "B", "settle": 500,
                             "timeout": 800}]))
 
+# -- 4차 묶음 2: 운영 쓰기 · 안전 입력 -------------------------------
+B2 = "b2.html"
+B2C = [G(B2)]
+WAIT = {"action": "wait", "ms": 300}
+
+
+def approved(cid, title, step):
+    return case(cid, title, [G(B2), step, WAIT], writes=True, approved=True, cleanup=B2C)
+
+
+# 승인 케이스 내장 blocklist 우회 경로: 버튼 안 아이콘 · Enter · onclick div 안 아이콘 (R3-02). 대조군은 '목록'
+BYPASS = [
+    approved("BY1", "버튼 안 아이콘 셀렉터", {"action": "click", "selector": "#send .ico", "write": True}),
+    approved("BY2", "버튼에 Enter", {"action": "press", "selector": "#send2", "key": "Enter", "write": True}),
+    approved("BY3", "onclick div 안 아이콘", {"action": "click", "selector": "div[onclick] > span", "write": True}),
+    approved("BY0", "대조군: 목록 버튼 안 아이콘", {"action": "click", "selector": "#list .ico", "write": True}),
+]
+SPECS["bypass"] = {"meta": meta("rg_bypass"), "cases": BYPASS}
+SPECS["bypass_off"] = {"meta": meta("rg_bypass_off", blocklist_off=["text*=발송"]), "cases": BYPASS}
+
+# GET 쓰기 의심 범위: 선택 변경 · 1초 뒤 · 다른 호스트. 무시 목록 경로는 신호 없음 (R3-09)
+SPECS["getw"]["meta"]["ignore_requests"] = ["/api/stat/update"]
+SPECS["getw"]["cases"] += [
+    case("G4", "선택 변경으로 나가는 GET",
+         [G(B2), {"action": "select", "selector": "#st", "value": "2", "write": False}, WAIT]),
+    case("G5", "클릭 1초 뒤 나가는 GET",
+         [G(B2), {"action": "click", "selector": "#lazyget"}, {"action": "wait", "ms": 1500}]),
+    case("G6", "다른 호스트로 가는 GET", [G(B2), {"action": "click", "selector": "#xget"}, WAIT]),
+    case("G7", "무시 목록 경로의 GET", [G(B2), {"action": "click", "selector": "#statget"}, WAIT]),
+]
+
+# write:false 로 둔 빈 폼 제출이 쓰기 요청을 보냄 = 검증 누락 후보 (R3-12)
+SPECS["wfalse"] = {"meta": meta("rg_wfalse"), "cases": [
+    case("WF1", "빈 폼 제출 시 필수 입력 알럿",
+         [G(B2), {"action": "click", "selector": "#submit", "label": "신청하기(빈 폼)", "write": False},
+          {"action": "expect_dialog", "equals": "필수 항목을 모두 입력해주세요."}], area="신청", fix="WF1 오류"),
+]}
+
+# ignore_requests: 막되 판정 무관. 호스트 없는 항목은 검수 사이트에만 (R3-11)
+SPECS["ignore"] = {"meta": meta("rg_ignore", ignore_requests=["/api/log", "//localhost/api/log2"]), "cases": [
+    case("IG1", "검수 사이트 로그 POST (경로 항목)",
+         [G(B2), {"action": "click", "selector": "#logbtn"}, WAIT, {"action": "expect_visible", "selector": "#title"}]),
+    case("IG2", "다른 호스트 로그 POST (호스트 항목)",
+         [G(B2), {"action": "click", "selector": "#xlog2"}, WAIT, {"action": "expect_visible", "selector": "#title"}]),
+    case("IG3", "다른 호스트의 같은 경로는 경로 항목으로 안 풀림",
+         [G(B2), {"action": "click", "selector": "#xlog"}, WAIT, {"action": "expect_visible", "selector": "#title"}]),
+]}
+
+# 글자 아닌 blocklist 는 스크립트 파일에 안 걸리고, 요청 주소(GET 링크)에는 걸림 (R3-19)
+SPECS["blres"] = {"meta": meta("rg_blres"), "blocklist": ["send", "del"], "cases": [
+    case("BL1", "이름에 send 가 든 스크립트가 실림", [G(B2), {"action": "expect_js", "js": "window.SB_OK === 1"}]),
+    case("BL2", "del 이 든 GET 링크는 막힘", [G(B2), {"action": "click", "selector": "#rmlink"}, WAIT]),
+]}
+
+# 탐색 헬퍼 guarded_page (R3-15). run_regress 가 같은 프로세스에서 연다
+SPECS["explore"] = {"meta": meta("rg_explore"), "cases": []}
+
+# 넓은 anchor 는 anchor 없음으로 (R3-13): 없는 셀렉터 + 케이스 anchor body = 점검 필요
+SPECS["dry"]["cases"].append(
+    case("S13", "없는 셀렉터 + 케이스 anchor body",
+         [G(), {"action": "expect_visible", "selector": "#typo-not-exist", "timeout": 1500}], anchor="body"))
+
 # 같은 project 의 다른 스펙이 비교 기준을 가로채지 않음 (개발자 D-N6)
 SPECS["m1"] = {"meta": meta("rg_shared"), "cases": [
     case("M1", "M1", [G(BP), {"action": "expect_text", "selector": "#title", "contains": "없는문구", "settle": 300}]),

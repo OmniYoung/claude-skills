@@ -242,8 +242,18 @@ r = run_fake([GOTO, {"action": "click", "selector": "#tab", "write": False, "_bl
 t("run_case: 요청을 막은 뒤 판정 실패는 점검 필요",
   (r["status"], r["reason"]), ("ERROR", "판정 불가 - 요청 차단로 화면 흐름이 달라짐: 다름 / 막은 요청: POST /api/x"))
 r = run_fake([GOTO, {"action": "click", "selector": "#tab", "write": False, "_pending": "POST /api/x"}])
-t("run_case: 마지막 스텝 뒤 남은 차단은 점검 필요", (r["status"], r["reason"].startswith("서버 요청을 막음: POST /api/x")),
-  ("ERROR", True))
+t("run_case: 마지막 스텝 뒤 남은 차단은 점검 필요 (사유에 설정 키 없음)",
+  (r["status"], r["reason"], "meta." in r["reason"]),
+  ("ERROR", qa_run.REASON_REQUEST_BLOCKED.format("POST /api/x"), False))
+# 승인 쓰기 스텝 뒤 download 가 띄운 확인창은 수락하지 않음 (R3-23, D-06)
+r = run_fake([GOTO, {"action": "click", "selector": "#save", "write": True},
+              {"action": "download", "selector": "#xls", "_dialog": "전체 내려받을까요?"}],
+             dry_run=False, writes=True, approved=True, cleanup=[GOTO])
+t("run_case: 쓰기 스텝 뒤 download 의 확인창은 취소 (점검 필요)",
+  (r["status"], r["reason"].startswith("확인창 '전체 내려받을까요?'")), ("ERROR", True))
+r = run_fake([GOTO, {"action": "click", "selector": "#save", "write": True, "_dialog": "저장할까요?"}],
+             dry_run=False, writes=True, approved=True, cleanup=[GOTO])
+t("run_case: 승인 쓰기 스텝의 확인창은 수락 (대조군)", (r["status"], r["reason"]), ("PASS", ""))
 r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "precondition": True, "anchor": "#b",
                      "_anchor_ok": True, "_raise": qa_run.AssertFail("없음")}])
 t("run_case: precondition 불일치 + anchor 보임 = 조건 미충족", (r["status"], r["reason"]), ("NA", "조건 미충족 - 없음"))

@@ -18,6 +18,7 @@ from datetime import datetime
 
 from gates import (W_NO_FIX, W_NO_AREA, W_ABSENCE_NO_ANCHOR, W_PRE_NO_ANCHOR, W_UNKNOWN_REQ,
                    W_SOFT_POSITION, W_APPROVED_FIRST_GOTO, W_SELECTOR_UPDATE, W_RESIDUE,
+                   W_BROAD_ANCHOR, W_SHORT_BLOCK, W_BLOCKLIST_OFF,
                    BLOCK_BLOCKLIST, BLOCK_UNDECLARED, BLOCK_RESIDUE_WRITE)
 
 # (라벨, 글자색, 바탕색, 아이콘)
@@ -864,6 +865,9 @@ LINT_KINDS = {
     W_UNKNOWN_REQ: "없는 요건 ID",
     W_SOFT_POSITION: "soft 위치",
     W_APPROVED_FIRST_GOTO: "승인 쓰기 케이스 첫 스텝 goto 아님",
+    W_BROAD_ANCHOR: "페이지 전체 anchor",
+    W_SHORT_BLOCK: "짧은 blocklist 주소 패턴",
+    W_BLOCKLIST_OFF: "내장 목록에 없는 blocklist_off",
 }
 
 

@@ -40,10 +40,18 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 DEFAULT_BLOCKLIST = ["text*=발송", "text*=결제", "text*=발주", "text*=일괄삭제", "text*=일괄 삭제"]
 
 # 분석 · 수집 도구. 막기는 하되(운영 통계 오염 방지) 판정에는 쓰지 않는다.
+# 화면을 그리는 외부 서비스(상담 채팅 위젯 등)는 넣지 않는다. 막혀서 화면이 달라졌는데 판정에서 빠지면
+# 그 뒤 판정 실패가 결함으로 넘어간다. 그런 요청은 스펙의 ignore_requests 에 호스트 형식으로 적는다.
 IGNORE_HOSTS = ("google-analytics.com", "analytics.google.com", "googletagmanager.com",
-                "doubleclick.net", "clarity.ms", "facebook.com", "facebook.net", "wcs.naver.net",
+                "doubleclick.net", "clarity.ms", "facebook.net", "wcs.naver.net",
                 "wcs.naver.com", "hotjar.com", "hotjar.io", "amplitude.com", "mixpanel.com",
-                "segment.io", "sentry.io", "datadoghq.com", "channel.io")
+                "segment.io", "sentry.io", "datadoghq.com")
+# 호스트 전체가 아니라 수집 경로만 무시하는 것 (호스트, 경로들)
+IGNORE_HOST_PATHS = (("facebook.com", ("/tr", "/tr/")),)
+
+# blocklist 의 주소 패턴을 대조하지 않는 요청 종류. 'send' 같은 짧은 단어가 sendbird.min.js 처럼
+# 스크립트 · 스타일 파일 이름에 걸려 화면이 안 그려지고 케이스가 줄줄이 점검 필요가 되는 것을 막는다
+URL_BLOCK_SKIP_TYPES = ("script", "stylesheet", "font")
 
 # GET 쓰기 의심 신호용 단어 (주소의 경로 · 쿼리). 막는 근거로는 쓰지 않는다.
 GET_WRITE_WORDS = ("delete", "remove", "save", "toggle", "withdraw", "cancel", "approve",
@@ -151,21 +159,38 @@ def runtime_write_hint(texts):
     return next((h for h in WRITE_HINTS if h in joined), None)
 
 
+# 같은 버튼을 가리키는 내장 항목 (띄어쓰기만 다름). 하나를 풀면 같이 푼다
+_OFF_PAIRS = {"text*=일괄삭제": "text*=일괄 삭제", "text*=일괄 삭제": "text*=일괄삭제"}
+
+
+def blocklist_off_item(p):
+    """meta.blocklist_off 한 항목을 내장 목록 표기로. 접두어 없이 '발주' 라고 적어도 'text*=발주' 로 받는다."""
+    p = str(p or "").strip()
+    return p if _text_pattern(p) else "text*=" + p
+
+
 def effective_blocklist(blocklist, approved_write=False, off=None):
-    """이 케이스에 적용할 blocklist. 승인된 쓰기 케이스면 내장 목록을 더한다."""
+    """이 케이스에 적용할 blocklist. 승인된 쓰기 케이스면 내장 목록을 더한다.
+
+    off(meta.blocklist_off) 중 내장 목록에 없는 항목은 무시한다 (그 버튼은 계속 막힌다, 경고로 알림).
+    """
     out = list(blocklist or [])
     if approved_write:
-        off = set(off or [])
-        out += [p for p in DEFAULT_BLOCKLIST if p not in off and p not in out]
+        offs = {blocklist_off_item(p) for p in (off or [])}
+        offs |= {_OFF_PAIRS[p] for p in offs if p in _OFF_PAIRS}
+        out += [p for p in DEFAULT_BLOCKLIST if p not in offs and p not in out]
     return out
 
 
-def url_block_hit(url, blocklist):
+def url_block_hit(url, blocklist, resource_type=""):
     """요청 주소가 blocklist 의 주소 패턴(text= · text*= 가 아닌 것)에 걸리는지.
 
     GET 으로 보내는 쓰기(레거시 delete.php?id= 등)는 메서드로 못 가린다. 기획자가 적어 둔
     주소 패턴만큼은 메서드와 승인 여부에 관계없이 네트워크 단에서 막는다.
+    스크립트 · 스타일 · 글꼴 파일 요청(resource_type)은 대조하지 않는다 (쓰기가 아니고, 막으면 화면이 깨진다).
     """
+    if resource_type in URL_BLOCK_SKIP_TYPES:
+        return None
     low = str(url or "").lower()
     for pattern in blocklist or []:
         if _text_pattern(pattern) or not pattern:
@@ -213,20 +238,58 @@ def _path_of(url):
         return ""
 
 
-def post_allowed(method, url, allow_post):
+def split_entry(p):
+    """allow_post · ignore_requests 한 항목을 (호스트 또는 None, 경로 패턴) 으로.
+
+    "/admin/list.do" · "re:/api/x" 는 호스트 없음(검수 사이트에만 적용).
+    "//ext.api.com/front/boot" · "re://ext.api.com/front/(a|b)" 는 그 호스트에만 적용한다.
+    경로 패턴은 정규식이면 're:' 를 앞에 붙여 돌려준다. 호스트 뒤에 경로가 없으면 경로는 "".
+    """
+    p = str(p)
+    is_re = p.startswith("re:")
+    body = p[3:] if is_re else p
+    if not body.startswith("//"):
+        return None, p
+    rest = body[2:]
+    i = rest.find("/")
+    host, path = (rest, "") if i < 0 else (rest[:i], rest[i:])
+    return host.lower(), ("re:" + path if is_re and path else path)
+
+
+def _entry_hit(url, entry, base_site):
+    """주소가 항목 하나와 맞는지. 호스트 없는 항목은 검수 사이트(base_site) 요청에만 맞는다.
+
+    base_site 가 None 이면 호스트를 보지 않는다 (예전 호출 호환, 러너는 항상 넘긴다).
+    """
+    if not entry:
+        return False
+    host, pat = split_entry(entry)
+    try:
+        h = (urlparse(url).hostname or "").lower()
+    except Exception:
+        h = ""
+    if host is None:
+        if base_site is not None and site_of(h) != base_site:
+            return False
+    elif h != host.split(":")[0]:
+        return False
+    return bool(pat) and _path_match(_path_of(url), pat)
+
+
+def post_allowed(method, url, allow_post, base_site=None):
     """meta.allow_post 에 적은 조회용 POST 인지.
 
     POST 에만 적용한다(PUT · DELETE 는 조회일 수 없다). 경로 전체가 같거나, 're:' 정규식이
     경로 전체와 맞아야 한다. 쿼리는 보지 않는다. 일부 문자열로 비교하면 공용 진입점 하나를
-    적었을 때 그 아래 쓰기 요청까지 다 열린다.
+    적었을 때 그 아래 쓰기 요청까지 다 열린다. 호스트 없는 항목은 검수 사이트에만, "//호스트/경로"
+    항목은 그 호스트에만 적용한다 (외부 API 경로를 적었을 때 자기 사이트의 같은 경로가 열리지 않게).
     """
     if str(method).upper() != "POST":
         return False
-    path = _path_of(url)
-    return any(p and _path_match(path, p) for p in (allow_post or []))
+    return any(_entry_hit(url, p, base_site) for p in (allow_post or []))
 
 
-def ignored_request(url, ignore_requests=None):
+def ignored_request(url, ignore_requests=None, base_site=None):
     """판정에 쓰지 않을 요청(분석 도구 · meta.ignore_requests). 막기는 그대로 한다."""
     try:
         host = (urlparse(url).hostname or "").lower()
@@ -235,7 +298,9 @@ def ignored_request(url, ignore_requests=None):
     if any(host == h or host.endswith("." + h) for h in IGNORE_HOSTS):
         return True
     path = _path_of(url)
-    return any(p and _path_match(path, p) for p in (ignore_requests or []))
+    if any((host == h or host.endswith("." + h)) and path in paths for h, paths in IGNORE_HOST_PATHS):
+        return True
+    return any(_entry_hit(url, p, base_site) for p in (ignore_requests or []))
 
 
 def get_write_suspect(url):
@@ -248,20 +313,68 @@ def get_write_suspect(url):
     return next((w for w in GET_WRITE_WORDS if w in hay), None)
 
 
-def path_list_errors(name, items):
-    """allow_post · ignore_requests 값 검증. 너무 넓은 값은 쓰기 요청까지 열어 버린다."""
+# 정규식의 앞쪽 글자(접두) 뒤에 붙여 보는 쓰기 주소. 하나라도 정규식 전체와 맞으면 넓은 정규식이다
+_WRITE_PROBES = ("save", "/save", "save.do", "/delete.do", "x/update.php", "proc")
+# 경계 없는 '.' 반복 (.* · .+ · .{n,}) - 그 자리에 쓰기 경로가 다 들어간다
+_DOT_REPEAT = re.compile(r"(?<!\\)\.[*+{]")
+_RE_SPECIAL = set(".^$*+?{}[]\\|()")
+_HOST_OK = re.compile(r"^[a-z0-9.-]+(:\d+)?$")
+
+
+def _literal_prefix(rx):
+    """정규식 앞쪽의 글자 그대로인 부분. 're:/admin/goods/(list|search)\\.do' 면 '/admin/goods/'."""
+    out, i = [], 1 if rx.startswith("^") else 0
+    while i < len(rx):
+        c = rx[i]
+        if c == "\\" and i + 1 < len(rx) and not rx[i + 1].isalnum():
+            ch, i = rx[i + 1], i + 2
+        elif c in _RE_SPECIAL:
+            break
+        else:
+            ch, i = c, i + 1
+        if i < len(rx) and rx[i] in "?*{":
+            break                       # 바로 뒤에 반복 기호가 붙은 글자는 없을 수도 있다
+        out.append(ch)
+    return "".join(out)
+
+
+def _regex_errors(name, p, pat):
+    """경로 정규식(re: 뒤) 검증. 넓으면 저장 · 삭제 주소까지 맞는다."""
+    try:
+        rx = re.compile(pat)
+    except re.error as e:
+        return ["meta.{}: 정규식 오류 '{}' ({})".format(name, p, e)]
+    if _DOT_REPEAT.search(pat):
+        return ["meta.{}: '{}' 에 경계 없는 '.*' · '.+' 반복이 있음 - 그 자리에 쓰기 주소가 다 들어간다. "
+                "'(list|search)' · '\\d+' 처럼 들어올 값을 정해 적는다".format(name, p)]
+    pre = _literal_prefix(pat)
+    probe = next((pre + w for w in _WRITE_PROBES if rx.fullmatch(pre + w)), None)
+    if rx.fullmatch("/") or rx.fullmatch("/qa/probe/save.do") or probe:
+        return ["meta.{}: '{}' 는 넓어서 쓰기 주소까지 맞음{} - 경로를 구체적으로 적는다".format(
+            name, p, " (예: {})".format(probe) if probe else "")]
+    return []
+
+
+def path_list_errors(name, items, base_site=None):
+    """allow_post · ignore_requests 값 검증. 너무 넓은 값은 쓰기 요청까지 열어 버린다.
+
+    "//호스트/경로" · "re://호스트/정규식" 도 받는다. ignore_requests 의 외부 호스트 항목만 경로 '/'
+    (짧은 경로)를 허용한다. 외부 수집기가 루트로 보내는 요청은 경로로 가를 수 없어서다.
+    """
     errs = []
     for p in items or []:
         p = str(p)
-        if p.startswith("re:"):
-            try:
-                rx = re.compile(p[3:])
-            except re.error as e:
-                errs.append("meta.{}: 정규식 오류 '{}' ({})".format(name, p, e))
-                continue
-            if rx.fullmatch("/") or rx.fullmatch("/qa/probe/save.do"):
-                errs.append("meta.{}: '{}' 는 거의 모든 주소와 맞음 - 경로를 구체적으로 적는다".format(name, p))
-        elif "?" in p or not p.startswith("/") or len(p) < 4:
+        host, pat = split_entry(p)
+        if host is not None and (not host or not _HOST_OK.match(host)):
+            errs.append("meta.{}: '{}' 의 호스트를 읽을 수 없음 - '//api.example.com/경로' 형식".format(name, p))
+            continue
+        external = host is not None and (base_site is None or site_of(host.split(":")[0]) != base_site)
+        if pat.startswith("re:"):
+            errs += _regex_errors(name, p, pat[3:])
+        elif "?" in pat or not pat.startswith("/"):
+            errs.append("meta.{}: '{}' 는 쓸 수 없음 - '/admin/list.do' 처럼 경로 전체를 적는다 "
+                        "(쿼리 · 4글자 미만 · '/' 단독 불가)".format(name, p))
+        elif len(pat) < 4 and not (name == "ignore_requests" and external):
             errs.append("meta.{}: '{}' 는 쓸 수 없음 - '/admin/list.do' 처럼 경로 전체를 적는다 "
                         "(쿼리 · 4글자 미만 · '/' 단독 불가)".format(name, p))
     return errs
@@ -320,11 +433,10 @@ SEVERITIES = ("", "치명", "주요", "경미")
 def spec_errors(spec):
     """실행 전에 멈춰야 하는 스펙 오류 (개발 전달로 가는 필드 · 안전망을 여는 값만 엄격하게)."""
     meta = spec.get("meta", {})
-    errs = path_list_errors("allow_post", meta.get("allow_post"))
-    errs += path_list_errors("ignore_requests", meta.get("ignore_requests"))
-    for p in meta.get("blocklist_off") or []:
-        if p not in DEFAULT_BLOCKLIST:
-            errs.append("meta.blocklist_off: '{}' 는 내장 목록에 없음 ({})".format(p, " · ".join(DEFAULT_BLOCKLIST)))
+    base_site = site_of(str(meta.get("base_url", "")))
+    errs = path_list_errors("allow_post", meta.get("allow_post"), base_site)
+    errs += path_list_errors("ignore_requests", meta.get("ignore_requests"), base_site)
+    # blocklist_off 오타는 멈추지 않는다 (승인 케이스에만 쓰이는 값이라 팀원 dry-run 까지 막지 않음). 경고로 알림
     for c in spec.get("cases", []):
         cid = c.get("id", "?")
         kind = c.get("kind", "defect")
@@ -348,6 +460,9 @@ W_APPROVED_FIRST_GOTO = "approved_first_goto"  # 승인 쓰기 케이스 첫 스
 W_SOFT_POSITION = "soft_position"              # soft 가 expect_* 아닌 스텝에 있음
 W_ABSENCE_NO_ANCHOR = "absence_no_anchor"      # '없어야 함' 판정에 anchor 없음
 W_PRE_NO_ANCHOR = "precondition_no_anchor"     # precondition 에 anchor 없음
+W_BROAD_ANCHOR = "broad_anchor"                # anchor 가 body · #wrap 처럼 페이지 전체
+W_SHORT_BLOCK = "short_blocklist"              # 글자가 아닌 blocklist 항목이 5글자 미만
+W_BLOCKLIST_OFF = "blocklist_off"              # blocklist_off 항목이 내장 목록에 없음 (무시, 계속 막음)
 # 실행 중 경고(qa_run) - 리포트 '확인할 경고' 블록(주황)으로 간다
 W_QA_PREFIX = "qa_prefix"                      # 입력값에 QA 프리픽스 없음
 W_RESIDUE = "residue"                          # 테스트 데이터가 남아 있을 수 있음 (할 일: 잔여 데이터 확인)
@@ -362,12 +477,37 @@ BLOCK_FIRST_GOTO = "first_goto"        # 승인 쓰기 케이스 첫 스텝이 g
 BLOCK_RESIDUE_WRITE = "residue_write"  # residue_check 에 쓰기 스텝
 
 
+# 기준 요소(anchor)로 못 쓰는 페이지 전체 셀렉터. body · html · :root 는 러너가 anchor 없음으로 친다
+BROAD_ANCHORS = ("body", "html", ":root", "header", "#header", "#wrap", "#wrapper", "#container",
+                 "#content", "#contents", "main", "#main")
+NO_ANCHORS = ("body", "html", ":root")
+
+
+def is_broad_anchor(sel):
+    return str(sel or "").strip().lower() in BROAD_ANCHORS
+
+
 def spec_warnings(spec):
     """멈추지는 않고 리포트에 경고로 남길 것. [(코드, 문장)]."""
     out = []
+    meta = spec.get("meta", {})
+    for p in meta.get("blocklist_off") or []:
+        if blocklist_off_item(p) not in DEFAULT_BLOCKLIST:
+            out.append((W_BLOCKLIST_OFF, "meta.blocklist_off '{}': 내장 목록에 없어 무시함 (그 버튼은 계속 막힘) - "
+                                         "내장 목록: {}".format(p, " · ".join(DEFAULT_BLOCKLIST))))
+    for p in spec.get("blocklist") or []:
+        p = str(p)
+        if not _text_pattern(p) and len(p.strip()) < 5:
+            out.append((W_SHORT_BLOCK, "blocklist '{}': 글자가 아닌 항목이 5글자 미만 - 요청 주소에 부분일치라 "
+                                       "엉뚱한 요청까지 막혀 점검 필요가 늘어남. 버튼 글자면 text= 로 적는다".format(p)))
     reqs = {q["id"] for q in spec.get("requirements", [])}
     for c in spec.get("cases", []):
         cid = c.get("id", "?")
+        broad = [a for a in [c.get("anchor")] + [st.get("anchor") for st in c.get("steps", [])] if is_broad_anchor(a)]
+        for a in dict.fromkeys(broad):
+            out.append((W_BROAD_ANCHOR, "{}: anchor '{}' 는 페이지 전체라 기준 요소가 못 됨 - 셀렉터가 낡아도 "
+                                        "'요소 없음' 이 결함(FAIL)으로 나갈 수 있음. 판정하는 영역의 표 헤더 · "
+                                        "패널 제목을 그 스텝의 anchor 로 단다".format(cid, a)))
         for rid in c.get("req") or []:
             if reqs and rid not in reqs:
                 out.append((W_UNKNOWN_REQ, "{}: requirements 에 없는 요건 ID '{}'".format(cid, rid)))
