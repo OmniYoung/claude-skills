@@ -16,6 +16,10 @@ import os
 import re
 from datetime import datetime
 
+from gates import (W_NO_FIX, W_NO_AREA, W_ABSENCE_NO_ANCHOR, W_PRE_NO_ANCHOR, W_UNKNOWN_REQ,
+                   W_SOFT_POSITION, W_APPROVED_FIRST_GOTO, W_SELECTOR_UPDATE, W_RESIDUE,
+                   BLOCK_BLOCKLIST, BLOCK_UNDECLARED, BLOCK_RESIDUE_WRITE)
+
 # (라벨, 글자색, 바탕색, 아이콘)
 RED = ("#b42318", "#fdecea")
 ORANGE = ("#9a3412", "#fff1e6")
@@ -156,13 +160,12 @@ REPRO_VERBS = {
 
 
 def _repro_steps(r):
-    """재현 절차. 실패한 스텝까지만 자르고, 조작이 아닌 스텝 · 건너뛴 스텝은 뺀다.
+    """재현 절차. 실패한 스텝까지만 자르고, 조작이 아닌 스텝 · 정리 스텝은 뺀다.
 
-    받는 사람이 그대로 따라 해볼 수 있어야 의미가 있다. 건너뛴 스텝을 넣으면
-    실제로 하지 않은 동작을 하라고 적는 셈이다.
+    받는 사람이 그대로 따라 해볼 수 있어야 의미가 있다.
     """
     out = []
-    test = [st for st in r["steps"] if st["phase"] != "cleanup" and st["status"] != "SKIP"]
+    test = [st for st in r["steps"] if st["phase"] != "cleanup"]
     # soft 스텝이 있으면 실패가 여러 개다. 마지막 실패까지 절차를 남긴다
     last = max((i for i, st in enumerate(test) if st["status"] == "FAIL"), default=len(test) - 1)
     for st in test[:last + 1]:
@@ -372,18 +375,19 @@ def _gate_block(r, spec_case, spec_path):
                  path=_esc(spec_path or "specs/*.json"))
 
     if r["status"] == "BLOCKED":
-        reason = r["reason"]
-        if "blocklist" in reason:
+        by = r.get("blocked_by")
+        if by == BLOCK_BLOCKLIST:
             why = ('이 버튼은 <b>의도적으로 막아둔 것</b>입니다. 승인 여부와 무관하게 차단됩니다. '
                    '정말 필요하면 스펙의 <code>blocklist</code> 에서 직접 빼야 합니다.')
-        elif "선언 누락" in reason or "쓰기 동작으로 판정" in reason:
+        elif by == BLOCK_UNDECLARED:
             why = ('<b>쓰기 동작이 있는데 쓰기 승인 선언이 없습니다.</b> 조회용 버튼이면 그 스텝에 '
                    '<code>"write": false</code>, 실제 쓰기면 <code>writes</code> · <code>approved</code> · '
                    '<code>cleanup</code> 을 넣어야 실행됩니다. Claude 에게 '
                    '<b>"{} 쓰기 판정 확인해줘"</b> 라고 요청합니다.').format(_esc(r["id"]))
-        elif "residue_check" in reason:
+        elif by == BLOCK_RESIDUE_WRITE:
             why = '잔여 데이터 점검에는 읽기 스텝만 둘 수 있습니다.'
         else:
+            # BLOCK_NO_CLEANUP · BLOCK_FIRST_GOTO
             why = ('쓰기 케이스인데 <b>정리(cleanup) 절차가 없습니다.</b> 만든 데이터를 되돌릴 '
                    '방법을 스펙에 넣어야 실행됩니다.')
         return '<div class="gate gate-blocked">{}<div class="gate-path">{}</div></div>'.format(
@@ -391,7 +395,7 @@ def _gate_block(r, spec_case, spec_path):
     return ""
 
 
-STEP_ICON = {"OK": ("✓", "통과"), "FAIL": ("✕", "실패"), "SKIP": ("–", "건너뜀")}
+STEP_ICON = {"OK": ("✓", "통과"), "FAIL": ("✕", "실패")}
 
 
 def _steps_html(r):
@@ -401,8 +405,7 @@ def _steps_html(r):
     lis = []
     for s in r["steps"]:
         icon, sr = STEP_ICON[s["status"]]
-        cls = "step-fail" if s["status"] == "FAIL" else (
-            "step-skip" if s["status"] == "SKIP" else "")
+        cls = "step-fail" if s["status"] == "FAIL" else ""
         wtag = '<span class="tag tag-w">쓰기</span>' if s["write"] else ""
         phase = '<span class="tag">정리</span>' if s["phase"] == "cleanup" else ""
         msg = '<div class="stepmsg">{}</div>'.format(_esc(s["msg"])) if s["msg"] else ""
@@ -413,9 +416,6 @@ def _steps_html(r):
     failed_at = next((s["n"] for s in r["steps"] if s["status"] == "FAIL"), None)
     if failed_at:
         summary = "스텝 {}개 · {}번째에서 어긋남".format(total, failed_at)
-    elif any(s["status"] == "SKIP" for s in r["steps"]):
-        n = sum(1 for s in r["steps"] if s["status"] == "SKIP")
-        summary = "스텝 {}개 · {}개 건너뜀".format(total, n)
     else:
         summary = "스텝 {}개 · 전부 통과".format(total)
     return ('<details class="stepbox"{o}><summary>{s}</summary>'
@@ -748,9 +748,9 @@ def _todo_html(results, cov_rows, warnings, n_dev, aborted=False):
     unver = sum(1 for x in cov_rows if x["status"] == "미검증")
     if unver:
         items.append('<a class="todo" href="#cov" onclick="openInfo(\'cov\')">미검증 요건 {}개</a>'.format(unver))
-    if any(w.startswith("셀렉터 갱신 필요") for w in warnings):
+    if _has_warn(warnings, W_SELECTOR_UPDATE):
         items.append('<a class="todo" href="#warn" onclick="openInfo(\'warn\')">셀렉터 갱신 요청</a>')
-    if any(w.startswith("테스트 데이터가 남아") for w in warnings):
+    if _has_warn(warnings, W_RESIDUE):
         items.append('<a class="todo" href="#warn" onclick="openInfo(\'warn\')">잔여 데이터 확인</a>')
     if not items:
         return '<div class="todoline"><b>할 일</b> 없음</div>'
@@ -782,21 +782,27 @@ def _aborted_html(run_meta, results):
         head=head, total=info["total"], done=min(len(results), info["total"]), how=how, ul=ul)
 
 
-# 스펙 점검 경고(종류별로 한 줄에 묶음, 회색)와 운영 위험 경고(주황)를 나눈다
-LINT_KINDS = (
-    ("fix(웍스 로그 한 줄)가 없어", "fix 없음"),
-    ("area 가 없어", "area 없음"),
-    ("anchor 가 없음", "anchor 없는 판정"),
-    ("requirements 에 없는 요건 ID", "없는 요건 ID"),
-    ("soft 는 expect_* 스텝에만", "soft 위치"),
-    ("첫 스텝이 goto 여야", "승인 쓰기 케이스 첫 스텝 goto 아님"),
-)
+# 스펙 점검 경고(종류별로 한 줄에 묶음, 회색)와 운영 위험 경고(주황)를 나눈다.
+# 경고는 (코드, 문장). 묶음은 코드로 정한다 (문장을 고쳐도 묶음이 안 깨지게). 여기 없는 코드는 주황
+LINT_KINDS = {
+    W_NO_FIX: "fix 없음",
+    W_NO_AREA: "area 없음",
+    W_ABSENCE_NO_ANCHOR: "anchor 없는 판정",
+    W_PRE_NO_ANCHOR: "anchor 없는 판정",
+    W_UNKNOWN_REQ: "없는 요건 ID",
+    W_SOFT_POSITION: "soft 위치",
+    W_APPROVED_FIRST_GOTO: "승인 쓰기 케이스 첫 스텝 goto 아님",
+}
+
+
+def _has_warn(warnings, code):
+    return any(c == code for c, _ in warnings)
 
 
 def _warn_blocks(warnings):
     lint, risk = {}, []
-    for w in warnings:
-        kind = next((k for pat, k in LINT_KINDS if pat in w), None)
+    for code, w in warnings:
+        kind = LINT_KINDS.get(code)
         if kind:
             lint.setdefault(kind, []).append(w.split(":", 1)[0])
         else:

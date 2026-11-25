@@ -80,7 +80,10 @@ from gates import (ALL_ACTIONS, SAFE_METHODS, is_write_step, static_block_hit,
                    runtime_block_hit, runtime_write_hint, site_of, post_allowed,
                    text_mismatch, count_mismatch, is_absence_check, norm,
                    spec_errors, spec_warnings, effective_blocklist, url_block_hit,
-                   ignored_request, get_write_suspect)
+                   ignored_request, get_write_suspect,
+                   W_QA_PREFIX, W_RESIDUE, W_SELECTOR_UPDATE, W_NA_STREAK,
+                   BLOCK_BLOCKLIST, BLOCK_UNDECLARED, BLOCK_NO_CLEANUP, BLOCK_FIRST_GOTO,
+                   BLOCK_RESIDUE_WRITE)
 
 # 스펙이 요구하는 러너 기능 수준. 스펙 meta.runner_min 이 이보다 크면 실행 전에 멈춘다.
 # 새 키 · 새 action 을 넣을 때만 올린다. run_qa.bat 도 이 줄을 읽어 낮으면 멈춘다
@@ -262,8 +265,13 @@ def read_table(path):
 # -- 스텝 실행 --------------------------------------------------
 
 class StepFailure(Exception):
-    """검수 스크립트 쪽 문제 (설정 오류 · 파일 없음 등). 케이스는 ERROR(점검 필요)."""
-    pass
+    """검수 스크립트 쪽 문제 (설정 오류 · 파일 없음 등). 케이스는 ERROR(점검 필요).
+
+    timeout=True 면 기다리다 끝난 것 (파일 다운로드 대기 등). 결과에 timeout 필드로 남는다.
+    """
+    def __init__(self, msg="", timeout=False):
+        super().__init__(msg)
+        self.timeout = timeout
 
 
 class AssertFail(StepFailure):
@@ -281,8 +289,13 @@ class PreconditionUnmet(Exception):
 
 
 class WriteBlocked(Exception):
-    """실행 직전에 쓰기 동작으로 판정됐는데 승인된 쓰기 케이스가 아님. 케이스는 BLOCKED."""
-    pass
+    """실행 직전에 쓰기 동작으로 판정됐는데 승인된 쓰기 케이스가 아님. 케이스는 BLOCKED.
+
+    blocked_by 는 gates.BLOCK_* 코드. 리포트가 사유 문장 대신 이 값으로 안내문을 고른다.
+    """
+    def __init__(self, msg, blocked_by):
+        super().__init__(msg)
+        self.blocked_by = blocked_by
 
 
 class SessionAbort(Exception):
@@ -292,12 +305,66 @@ class SessionAbort(Exception):
         self.result = result
 
 
+# -- 사유 · 경고 문장 ---------------------------------------------
+# 결과 사유와 경고 문장은 여기 한 곳에 둔다. 회귀 테스트(tests/regress)는 이 상수를 import 해
+# 기대값을 맞추고, 리포트는 문장이 아니라 코드 · 필드(timeout, blocked_by, 경고 코드)로 읽는다.
+# 문장을 고칠 때는 SKILL.md · spec_schema.md 의 인용도 같이 고친다.
+
+# 게이트 (실행 전)
+REASON_BLOCKLIST = "blocklist 패턴 '{}' 매칭 - 실행 거부"
+REASON_UNDECLARED = "writes 선언 누락 - {phase}스텝 {n} '{label}' 이 쓰기 동작"
+REASON_UNDECLARED_CLEANUP = "정리 "          # REASON_UNDECLARED 의 {phase} (정리 스텝일 때)
+REASON_DRY_RUN = "dry-run 모드 - 쓰기 케이스 건너뜀"
+REASON_UNAPPROVED = "쓰기 미승인 - 케이스에 approved:true 필요"
+REASON_NO_CLEANUP = "쓰기 케이스인데 cleanup 스텝이 없음 - 실행 거부"
+REASON_FIRST_GOTO = "승인 쓰기 케이스는 첫 스텝이 goto 여야 함 - 실행 거부"
+REASON_RESIDUE_WRITE = "residue_check 에 쓰기 스텝이 있음 - 읽기만 가능"
+# 실행 중 (화면 글자로 막음)
+REASON_RUNTIME_BLOCKLIST = "blocklist 패턴 '{}' 와 같은 버튼 - 실행 거부"
+REASON_RUNTIME_WRITE = ("버튼 글자 '{shown}' 에 '{hint}' 이 있어 쓰기 동작으로 판정 - writes·approved 선언 필요. "
+                        "조회 버튼이면 스텝에 write:false")
+# 안전망
+INTERFERE_REQUEST = "요청 차단"     # runner.interfered 에 넣는 값. REASON_INTERFERED 의 {what} 에 들어간다
+INTERFERE_DIALOG = "확인창 취소"
+REASON_REQUEST_BLOCKED = ("서버 요청을 막음: {} - 쓰기 승인된 케이스가 아님. 조회용 POST 면 meta.allow_post, "
+                          "로그성 요청이면 meta.ignore_requests 에 경로를 적는다")
+REASON_GUARD_ERROR = "안전망 처리 오류로 막음: {} {}"
+REASON_DIALOG_DISMISSED = ("확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 문구만 확인하려면 "
+                           "다음 스텝에 expect_dialog 를 둔다")
+REASON_INTERFERED = "판정 불가 - {what}로 화면 흐름이 달라짐: {reason}{blocked}"
+REASON_INTERFERED_BLOCKED = " / 막은 요청: {}"   # REASON_INTERFERED 의 {blocked} (막은 요청이 있을 때)
+# 판정 결과
+REASON_TIMEOUT = "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 ({})"
+REASON_DOWNLOAD_TIMEOUT = "파일이 내려오지 않음 - 시간 초과 ({}초)"
+REASON_SESSION = "세션 만료로 중단 - {}"
+REASON_NA = "조건 미충족 - {}"
+REASON_PRE_UNKNOWN = "조건 확인 불가 - {} (anchor 가 없거나 안 보임)"
+REASON_PRE_WRITE = "precondition 스텝은 읽기만 가능: {}"
+REASON_CLEANUP_FAIL = " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}"
+REASON_FLAKY = "1차 실패, 재실행 통과 - {}"
+# 경고 (코드는 gates.W_*)
+WARN_QA_PREFIX = "{} 스텝{}: 입력값 '{}'에 QA 프리픽스({})가 없음 - 운영 데이터 오염 주의"
+WARN_RESIDUE = "테스트 데이터가 남아 있을 수 있음 - 수동 확인 필요: {}"
+WARN_SELECTOR_UPDATE = ("셀렉터 갱신 필요: {} 가 {}건에서 시간 초과 - 화면 구조가 바뀐 것으로 보임. "
+                        "Claude 에게 '{} 셀렉터 갱신해줘' 라고 요청")
+WARN_NA_STREAK = ("{}: {}회 연속 조건 미충족 - precondition 이 실제 결함을 가리고 있지 않은지 "
+                  "다른 경로로 확인 필요")
+
+
 def _reason(e):
     """예외를 사유 한 줄로. 시간 초과는 왜 점검이 필요한지 같이 적는다."""
     msg = str(e).split("\n")[0][:300]
     if isinstance(e, PWTimeout) or ("Timeout" in msg and "exceeded" in msg):
-        return "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 ({})".format(msg[:200])
+        return REASON_TIMEOUT.format(msg[:200])
     return msg
+
+
+def is_timeout(e):
+    """기다리다 끝난 예외인지. 사유 문장이 아니라 예외 종류 · 표시로 가린다 (결과의 timeout 필드)."""
+    if getattr(e, "timeout", False) or isinstance(e, PWTimeout):
+        return True
+    msg = str(e).split("\n")[0][:300]
+    return "Timeout" in msg and "exceeded" in msg
 
 
 REL_KO = {"below": "아래", "above": "위", "right_of": "오른쪽", "left_of": "왼쪽", "inside": "안"}
@@ -347,7 +414,7 @@ class Runner:
         self.ignore_requests = meta.get("ignore_requests", [])
         self.dialogs = []          # 직전 조작이 띄운 알럿 기록
         self.dismissed = []        # 승인 없이 떠서 취소한 확인창
-        self.warnings = []
+        self.warnings = []         # [(gates.W_* 코드, 문장)]
         self.shots = []
         self.files = {}   # download 로 받은 파일
         self.signals = []  # 케이스 하나 동안 난 JS 오류 · 콘솔 오류 · 실패한 요청 (참고용)
@@ -419,8 +486,8 @@ class Runner:
             except Exception:
                 pass
             try:
-                self.blocked.append("안전망 처리 오류로 막음: {} {}".format(request.method, request.url[:120]))
-                self.interfered.add("요청 차단")
+                self.blocked.append(REASON_GUARD_ERROR.format(request.method, request.url[:120]))
+                self.interfered.add(INTERFERE_REQUEST)
             except Exception:
                 pass
 
@@ -435,22 +502,18 @@ class Runner:
             self.blocked.append(line)
         if line not in self.blocked_log:
             self.blocked_log.append(line)
-        self.interfered.add("요청 차단")
+        self.interfered.add(INTERFERE_REQUEST)
 
     def check_blocked(self):
         """막은 요청이 있으면 스텝을 점검 필요로 끝낸다."""
         if self.blocked:
             lines, self.blocked = self.blocked, []
-            raise StepFailure(
-                "서버 요청을 막음: {} - 쓰기 승인된 케이스가 아님. 조회용 POST 면 meta.allow_post, "
-                "로그성 요청이면 meta.ignore_requests 에 경로를 적는다".format(" / ".join(lines[:3])))
+            raise StepFailure(REASON_REQUEST_BLOCKED.format(" / ".join(lines[:3])))
 
     def check_dismissed(self):
         if self.dismissed:
             msgs, self.dismissed = self.dismissed, []
-            raise StepFailure(
-                "확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 문구만 확인하려면 "
-                "다음 스텝에 expect_dialog 를 둔다".format(" | ".join(msgs)[:150]))
+            raise StepFailure(REASON_DIALOG_DISMISSED.format(" | ".join(msgs)[:150]))
 
     def attach(self, page):
         """페이지에 알럿 처리와 콘솔 · 네트워크 오류 수집을 붙인다.
@@ -529,7 +592,7 @@ class Runner:
                     dialog.accept()
                 else:
                     self.dismissed.append(dialog.message)
-                    self.interfered.add("확인창 취소")
+                    self.interfered.add(INTERFERE_DIALOG)
                     dialog.dismiss()
             else:
                 dialog.accept()
@@ -571,9 +634,7 @@ class Runner:
         """
         if (self.qa_prefix and len(value) >= 2 and self.qa_prefix not in value
                 and not value.replace(".", "").isdigit()):
-            self.warnings.append(
-                "{} 스텝{}: 입력값 '{}'에 QA 프리픽스({})가 없음 - 운영 데이터 오염 주의".format(
-                    case_id, idx, value, self.qa_prefix))
+            self.warnings.append((W_QA_PREFIX, WARN_QA_PREFIX.format(case_id, idx, value, self.qa_prefix)))
 
     def _url(self, url):
         return url if url.startswith("http") else self.base_url + "/" + url.lstrip("/")
@@ -852,7 +913,7 @@ class Runner:
             texts = []
         hit = runtime_block_hit(texts, self.blocklist)
         if hit:
-            raise WriteBlocked("blocklist 패턴 '{}' 와 같은 버튼 - 실행 거부".format(hit))
+            raise WriteBlocked(REASON_RUNTIME_BLOCKLIST.format(hit), BLOCK_BLOCKLIST)
         if "write" in step:
             return h
         hint = runtime_write_hint(texts)
@@ -860,9 +921,7 @@ class Runner:
             self.step_write = True
         if hint and not self.allow_writes:
             shown = norm(" ".join(t for t in texts if t))[:40]
-            raise WriteBlocked(
-                "버튼 글자 '{}' 에 '{}' 이 있어 쓰기 동작으로 판정 - writes·approved 선언 필요. "
-                "조회 버튼이면 스텝에 write:false".format(shown, hint))
+            raise WriteBlocked(REASON_RUNTIME_WRITE.format(shown=shown, hint=hint), BLOCK_UNDECLARED)
         return h
 
     def _after_nav(self, before):
@@ -924,8 +983,8 @@ class Runner:
                     if self.blocked:
                         self.check_blocked()
                     if time.time() >= end:
-                        raise StepFailure("파일이 내려오지 않음 - 시간 초과 ({}초)".format(
-                            step.get("timeout", 120000) // 1000))
+                        raise StepFailure(REASON_DOWNLOAD_TIMEOUT.format(
+                            step.get("timeout", 120000) // 1000), timeout=True)
                     self.page.wait_for_timeout(500)
             finally:
                 self.in_click = False
@@ -1155,7 +1214,7 @@ class Runner:
             err = self._until(check, step.get("timeout", 5000))
             # 확인창 문구를 본 것이므로 취소 기록은 의도한 것
             self.dismissed = []
-            self.interfered.discard("확인창 취소")
+            self.interfered.discard(INTERFERE_DIALOG)
             if err:
                 raise AssertFail(err)
 
@@ -1272,10 +1331,10 @@ def diagnose_chain(runner, case, result, dry_run):
     실패한 스텝을 **직전 동작 하나만 앞세워** 새 페이지에서 다시 밟아본다.
     통과하면 앞선 동작들이 남긴 상태가 원인이고, 그대로 실패하면 기능 자체 문제다.
 
-    쓰기를 다시 하게 되는 경우는 진단하지 않는다. dry-run · 건너뛴 스텝이 있는 실행도
+    쓰기를 다시 하게 되는 경우는 진단하지 않는다. dry-run 실행도
     애초에 기획대로 밟은 게 아니라 진단할 수 없다.
     """
-    if dry_run or any(s["status"] == "SKIP" for s in result["steps"]) or case_writes(case):
+    if dry_run or case_writes(case):
         return None
     steps = case["steps"]
     failed = next((s["n"] for s in result["steps"]
@@ -1326,6 +1385,53 @@ def diagnose_chain(runner, case, result, dry_run):
     return verdict
 
 
+def final_status(exc, steps, interfered, dismissed, blocked_log):
+    """케이스 본 스텝이 끝난 예외를 (상태, 사유) 로 바꾼다. 브라우저 없이 단위 테스트한다.
+
+    exc 가 None 이면 통과. steps(스텝 기록) · dismissed(취소한 확인창) 는 지금 판정에는 쓰지 않는다.
+    화면이 기대와 다르면 FAIL, 요소를 못 찾았거나 시간 초과 · 설정 오류면 ERROR(점검 필요).
+    ERROR 는 개발 전달에 넣지 않는다. 셀렉터가 낡아서 난 실패를 결함으로 넘기지 않기 위함이다.
+    """
+    if exc is None:
+        return "PASS", ""
+    if isinstance(exc, SessionExpired):
+        return "ERROR", REASON_SESSION.format(exc)
+    if isinstance(exc, WriteBlocked):
+        return "BLOCKED", str(exc)
+    if isinstance(exc, PreconditionUnmet):
+        # 운영 데이터가 바뀌어 검수할 대상이 없는 것. 결함도 스크립트 오류도 아니다
+        return "NA", REASON_NA.format(exc)
+    reason = _reason(exc)
+    if not isinstance(exc, AssertFail):
+        return "ERROR", reason
+    # 안전망이 요청을 막았거나 확인창을 취소했으면 화면 흐름이 실제 사용과 다르다.
+    # 그 뒤의 판정 실패는 결함이라고 할 수 없으므로 개발 전달로 보내지 않는다
+    if interfered:
+        return "ERROR", REASON_INTERFERED.format(
+            what=" · ".join(sorted(interfered)), reason=reason,
+            blocked=REASON_INTERFERED_BLOCKED.format(" / ".join(blocked_log[:2])) if blocked_log else "")
+    return "FAIL", reason
+
+
+def merge_retry(first, second):
+    """1차 결과(first)와 재실행 결과(second)를 합친 새 결과. 두 dict 는 바꾸지 않는다.
+
+    first["shots"] 는 _try1 로 이름을 바꿔 둔 1차 스크린샷이어야 한다.
+    """
+    r = dict(second)
+    r["duration"] = round(first["duration"] + second["duration"], 1)
+    r["try1"] = {"status": first["status"], "reason": first["reason"], "shots": first["shots"]}
+    r["shots"] = first["shots"] + second["shots"]
+    if r["status"] == "PASS" and first["status"] == "FAIL":
+        # 화면이 기대와 달랐다가 다시 보니 맞았다. 통과로 덮지 않고 기획팀이 본다
+        r.update(status="FLAKY", reason=REASON_FLAKY.format(first["reason"]))
+    elif r["status"] == "PASS":
+        r["flaky"] = first["reason"]
+    else:
+        r["retried"] = True
+    return r
+
+
 def run_case(runner, case, blocklist, dry_run):
     """케이스 하나 실행. 결과 dict 반환."""
     cid = case["id"]
@@ -1361,8 +1467,7 @@ def run_case(runner, case, blocklist, dry_run):
     for step in case["steps"] + case.get("cleanup", []):
         hit = static_block_hit(step, eff_block)
         if hit:
-            result.update(status="BLOCKED",
-                          reason="blocklist 패턴 '{}' 매칭 - 실행 거부".format(hit))
+            result.update(status="BLOCKED", reason=REASON_BLOCKLIST.format(hit), blocked_by=BLOCK_BLOCKLIST)
             return result
 
     # -- 게이트 2: 쓰기 선언 · 승인 --
@@ -1371,22 +1476,23 @@ def run_case(runner, case, blocklist, dry_run):
     wsteps = case_write_steps(case)
     if wsteps and not case.get("writes"):
         phase, i, st = wsteps[0]
-        result.update(status="BLOCKED", reason="writes 선언 누락 - {}스텝 {} '{}' 이 쓰기 동작".format(
-            "정리 " if phase == "cleanup" else "", i, step_label(st)))
+        result.update(status="BLOCKED", reason=REASON_UNDECLARED.format(
+            phase=REASON_UNDECLARED_CLEANUP if phase == "cleanup" else "", n=i, label=step_label(st)),
+            blocked_by=BLOCK_UNDECLARED)
         return result
     if case.get("writes"):
         if dry_run:
-            result.update(status="SKIPPED", reason="dry-run 모드 - 쓰기 케이스 건너뜀")
+            result.update(status="SKIPPED", reason=REASON_DRY_RUN)
             return result
         if not case.get("approved"):
-            result.update(status="SKIPPED", reason="쓰기 미승인 - 케이스에 approved:true 필요")
+            result.update(status="SKIPPED", reason=REASON_UNAPPROVED)
             return result
         if not case.get("cleanup"):
-            result.update(status="BLOCKED", reason="쓰기 케이스인데 cleanup 스텝이 없음 - 실행 거부")
+            result.update(status="BLOCKED", reason=REASON_NO_CLEANUP, blocked_by=BLOCK_NO_CLEANUP)
             return result
         # 앞 케이스가 남긴 타이머 · 화면의 요청이 쓰기 허용 구간에 섞이지 않게, 새로 접속한 뒤에만 연다
         if (case["steps"] or [{}])[0].get("action") != "goto":
-            result.update(status="BLOCKED", reason="승인 쓰기 케이스는 첫 스텝이 goto 여야 함 - 실행 거부")
+            result.update(status="BLOCKED", reason=REASON_FIRST_GOTO, blocked_by=BLOCK_FIRST_GOTO)
             return result
 
     shots_before = len(runner.shots)
@@ -1407,7 +1513,7 @@ def run_case(runner, case, blocklist, dry_run):
             act = step.get("action")
             write = is_write_step(step)
             if step.get("precondition") and write:
-                raise StepFailure("precondition 스텝은 읽기만 가능: {}".format(label))
+                raise StepFailure(REASON_PRE_WRITE.format(label))
             # 확인창은 쓰기 스텝부터 다음 조작이 시작될 때까지 수락한다 (늦게 뜨는 확인창 대비)
             if write or act in INTERACTION_ACTIONS or act == "goto":
                 runner.step_write = write
@@ -1428,7 +1534,7 @@ def run_case(runner, case, blocklist, dry_run):
                     # 조건이 안 맞는 건지, 화면이 안 그려졌거나 셀렉터가 낡은 건지 anchor 로 가른다
                     if isinstance(e, AssertFail) and runner._anchor_visible(step, 2000):
                         raise PreconditionUnmet(msg)
-                    raise StepFailure("조건 확인 불가 - {} (anchor 가 없거나 안 보임)".format(msg))
+                    raise StepFailure(REASON_PRE_UNKNOWN.format(msg), timeout=is_timeout(e))
                 state["failed_step"] = step
                 # soft: 판정이 틀려도 멈추지 않고 다음 검증까지 본다. 끝나고 한꺼번에 실패 처리
                 if (phase == "test" and step.get("soft") and isinstance(e, AssertFail)
@@ -1449,51 +1555,39 @@ def run_case(runner, case, blocklist, dry_run):
         exec_steps(case["steps"], "test")
         if soft_fails:
             raise AssertFail(" / ".join(soft_fails))
-    except SessionExpired as e:
-        # 개별 케이스 실패로 묻지 않고 전체 실행을 멈춘다. 그 전에 정리는 시도한다
-        aborted = e
-        result.update(status="ERROR", reason="세션 만료로 중단 - {}".format(e))
-    except WriteBlocked as e:
-        result.update(status="BLOCKED", reason=str(e))
-    except PreconditionUnmet as e:
-        # 운영 데이터가 바뀌어 검수할 대상이 없는 것. 결함도 스크립트 오류도 아니다
-        result.update(status="NA", reason="조건 미충족 - {}".format(e))
-        try:
-            runner._shoot("{}_NA".format(cid))
-        except Exception:
-            pass
     except Exception as e:
-        # 화면이 기대와 다르면 FAIL, 요소를 못 찾았거나 시간 초과 · 설정 오류면 ERROR(점검 필요).
-        # ERROR 는 개발 전달에 넣지 않는다. 셀렉터가 낡아서 난 실패를 결함으로 넘기지 않기 위함이다.
-        result.update(status="FAIL" if isinstance(e, AssertFail) else "ERROR",
-                      reason=_reason(e))
-        if result["status"] == "ERROR" and "시간 초과" in result["reason"]:
-            fs = state["failed_step"] or {}
-            result["err_selector"] = fs.get("selector", "")
-        # 앞에서 건너뛴 스텝이 있으면 화면이 기획대로 밟은 상태가 아니다. FAIL 로 넘기지 않는다
-        if result["status"] == "FAIL" and any(s["status"] == "SKIP" for s in result["steps"]):
-            result.update(status="ERROR", reason="판정 불가 - 앞 스텝을 건너뛰어 화면 상태가 다름: "
-                          + result["reason"])
-        # 안전망이 요청을 막았거나 확인창을 취소했으면 화면 흐름이 실제 사용과 다르다.
-        # 그 뒤의 판정 실패는 결함이라고 할 수 없으므로 개발 전달로 보내지 않는다
-        if result["status"] == "FAIL" and runner.interfered:
-            result.update(status="ERROR", reason="판정 불가 - {}로 화면 흐름이 달라짐: {}{}".format(
-                " · ".join(sorted(runner.interfered)), result["reason"],
-                " / 막은 요청: " + " / ".join(runner.blocked_log[:2]) if runner.blocked_log else ""))
-        try:
-            runner._shoot_failure(cid, state["failed_step"])
-        except Exception:
-            pass
-        if runner.fail_url:
-            result["fail_url"] = runner.fail_url
-        # chains 케이스는 "이어서 했기 때문인지" 를 자동으로 가린다
-        if case.get("chains") and result["status"] == "FAIL":
+        status, reason = final_status(e, result["steps"], runner.interfered, runner.dismissed,
+                                      runner.blocked_log)
+        result.update(status=status, reason=reason)
+        if isinstance(e, SessionExpired):
+            # 개별 케이스 실패로 묻지 않고 전체 실행을 멈춘다. 그 전에 정리는 시도한다
+            aborted = e
+        elif isinstance(e, PreconditionUnmet):
             try:
-                diag = diagnose_chain(runner, case, result, dry_run)
-            except SessionExpired as e2:
-                aborted, diag = e2, None
-            if diag:
-                result["diagnosis"] = diag
+                runner._shoot("{}_NA".format(cid))
+            except Exception:
+                pass
+        elif isinstance(e, WriteBlocked):
+            result["blocked_by"] = e.blocked_by
+        else:
+            # 셀렉터 갱신 요청 집계용. 사유 문장이 아니라 예외로 가린다 (판정 실패 AssertFail 은 제외)
+            if status == "ERROR" and not isinstance(e, AssertFail) and is_timeout(e):
+                result["timeout"] = True
+                result["err_selector"] = (state["failed_step"] or {}).get("selector", "")
+            try:
+                runner._shoot_failure(cid, state["failed_step"])
+            except Exception:
+                pass
+            if runner.fail_url:
+                result["fail_url"] = runner.fail_url
+            # chains 케이스는 "이어서 했기 때문인지" 를 자동으로 가린다
+            if case.get("chains") and result["status"] == "FAIL":
+                try:
+                    diag = diagnose_chain(runner, case, result, dry_run)
+                except SessionExpired as e2:
+                    aborted, diag = e2, None
+                if diag:
+                    result["diagnosis"] = diag
 
     # -- 정리(cleanup)는 본 테스트 실패와 무관하게 항상 시도 --
     # 첫 goto 전에 멈췄으면 쓰기 허용 구간이 열린 적이 없으므로 정리할 것도 없다
@@ -1508,7 +1602,7 @@ def run_case(runner, case, blocklist, dry_run):
             result["unclean_inputs"] = [
                 str(st.get("value", st.get("text", ""))) for st in case["steps"]
                 if st.get("action") in ("fill", "type", "select") and is_write_step(st)][:10]
-            result["reason"] += " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}".format(_reason(e)[:150])
+            result["reason"] += REASON_CLEANUP_FAIL.format(_reason(e)[:150])
             # 정리 실패는 테스트 데이터 문제지 구현 결함이 아니다. 개발 전달로 가지 않게 ERROR 로 둔다
             if result["status"] == "PASS":
                 result["status"] = "ERROR"
@@ -1656,15 +1750,14 @@ def mark_trend(results, prev_results):
 
 
 def na_streak_warnings(results, past, n=3):
-    """같은 케이스가 n회 연속 조건 미충족이면 precondition 이 결함을 가리고 있을 수 있다."""
+    """같은 케이스가 n회 연속 조건 미충족이면 precondition 이 결함을 가리고 있을 수 있다. [(코드, 문장)]."""
     out = []
     hist = [_load_results(d) for d in past[-(n - 1):]] if n > 1 else []
     for r in results:
         if r["status"] != "NA" or len(hist) < n - 1:
             continue
         if all(any(x["id"] == r["id"] and x["status"] == "NA" for x in h) for h in hist):
-            out.append("{}: {}회 연속 조건 미충족 - precondition 이 실제 결함을 가리고 있지 않은지 "
-                       "다른 경로로 확인 필요".format(r["id"], n))
+            out.append((W_NA_STREAK, WARN_NA_STREAK.format(r["id"], n)))
     return out
 
 
@@ -2458,19 +2551,8 @@ def main():
                 # 같은 셀렉터가 여러 케이스에서 시간 초과면 화면 구조가 바뀐 것이라 재실행해도 소용없다.
                 if (r["status"] in BAD and not args.no_retry and not r["writes"]
                         and timeout_hits.get(sel, 0) < 2):
-                    first = r
-                    shots1 = keep_try1(first)
-                    r = run_case(runner, case, blocklist, args.dry_run)
-                    r["duration"] = round(first["duration"] + r["duration"], 1)
-                    r["try1"] = {"status": first["status"], "reason": first["reason"], "shots": shots1}
-                    r["shots"] = shots1 + r["shots"]
-                    if r["status"] == "PASS" and first["status"] == "FAIL":
-                        # 화면이 기대와 달랐다가 다시 보니 맞았다. 통과로 덮지 않고 기획팀이 본다
-                        r.update(status="FLAKY", reason="1차 실패, 재실행 통과 - " + first["reason"])
-                    elif r["status"] == "PASS":
-                        r["flaky"] = first["reason"]
-                    else:
-                        r["retried"] = True
+                    first = dict(r, shots=keep_try1(r))
+                    r = merge_retry(first, run_case(runner, case, blocklist, args.dry_run))
             finally:
                 if trace:
                     try:
@@ -2524,15 +2606,14 @@ def main():
                     residue["session"] = rc_session
                 if case_write_steps(residue):
                     r = run_case(runner, dict(residue, steps=[]), blocklist, args.dry_run)
-                    r.update(status="BLOCKED", reason="residue_check 에 쓰기 스텝이 있음 - 읽기만 가능")
+                    r.update(status="BLOCKED", reason=REASON_RESIDUE_WRITE, blocked_by=BLOCK_RESIDUE_WRITE)
                 else:
                     try:
                         r = run_one(residue)
                     except SessionAbort as e:
                         r = e.result
                 if r["status"] != "PASS":
-                    runner.warnings.append(
-                        "테스트 데이터가 남아 있을 수 있음 - 수동 확인 필요: {}".format(r["reason"]))
+                    runner.warnings.append((W_RESIDUE, WARN_RESIDUE.format(r["reason"])))
                 results.append(r)
         except Exception as e:
             if not aborted:
@@ -2547,9 +2628,7 @@ def main():
 
     for sel, n in timeout_hits.items():
         if n >= 2:
-            runner.warnings.append(
-                "셀렉터 갱신 필요: {} 가 {}건에서 시간 초과 - 화면 구조가 바뀐 것으로 보임. "
-                "Claude 에게 '{} 셀렉터 갱신해줘' 라고 요청".format(sel, n, spec_path.stem))
+            runner.warnings.append((W_SELECTOR_UPDATE, WARN_SELECTOR_UPDATE.format(sel, n, spec_path.stem)))
     runner.warnings += na_streak_warnings(results, past)
 
     prev = None

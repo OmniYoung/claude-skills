@@ -1,6 +1,7 @@
 """qa_run.py 의 브라우저 없는 부분 단위 테스트:  py qa_auto/tests/test_runner.py
 
-지난 실행 정리(prune) · 비교 표시(mark_trend) · 비교 기준 · trace 사본 · 폴더 이름.
+지난 실행 정리(prune) · 비교 표시(mark_trend) · 비교 기준 · trace 사본 · 폴더 이름 ·
+판정 변환(final_status) · 재실행 병합(merge_retry) · 경고 코드 묶음 · run_case 상태 전이(FakeRunner).
 임시 폴더만 쓰고, 끝나면 그 폴더 하나만 지운다.
 """
 
@@ -68,6 +69,180 @@ t("fix 없으면 영역 오류: 실제 현상", report._fix_line(r, with_id=True
 t("개발 탭은 [치명] 없이", report._fix_line(r, sev_prefix=False), "목록 오류: b (SB: SB-01)")
 t("주소의 토큰 가림", report._mask_url("https://a/x?sid=abc&page=2&access_token=zz"),
   "https://a/x?sid=***&page=2&access_token=***")
+
+
+# -- 판정 변환 (final_status) 현행 동작 표 ----------------------
+# (이름, 예외, interfered, dismissed, blocked_log, 기대 상태, 기대 사유)
+FS = qa_run.final_status
+REQ, DLG = qa_run.INTERFERE_REQUEST, qa_run.INTERFERE_DIALOG
+FS_TABLE = [
+    ("예외 없음 = 통과", None, set(), [], [], "PASS", ""),
+    ("세션 만료", qa_run.SessionExpired("만료"), set(), [], [], "ERROR", "세션 만료로 중단 - 만료"),
+    ("쓰기 차단", qa_run.WriteBlocked("막음", "undeclared"), set(), [], [], "BLOCKED", "막음"),
+    ("조건 미충족", qa_run.PreconditionUnmet("없음"), set(), [], [], "NA", "조건 미충족 - 없음"),
+    ("스크립트 문제", qa_run.StepFailure("요소 없음"), set(), [], [], "ERROR", "요소 없음"),
+    ("스크립트 문제는 개입 있어도 사유 그대로", qa_run.StepFailure("요소 없음"), {REQ}, [], ["POST /a"],
+     "ERROR", "요소 없음"),
+    ("시간 초과", qa_run.PWTimeout("Timeout 3000ms exceeded."), set(), [], [], "ERROR",
+     "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 (Timeout 3000ms exceeded.)"),
+    ("판정 실패", qa_run.AssertFail("문구 불일치"), set(), [], [], "FAIL", "문구 불일치"),
+    ("요청 차단 뒤 판정 실패", qa_run.AssertFail("문구 불일치"), {REQ}, [], ["POST /a", "POST /b", "POST /c"],
+     "ERROR", "판정 불가 - 요청 차단로 화면 흐름이 달라짐: 문구 불일치 / 막은 요청: POST /a / POST /b"),
+    ("확인창 취소 뒤 판정 실패", qa_run.AssertFail("문구 불일치"), {DLG}, ["삭제?"], [],
+     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 문구 불일치"),
+    ("둘 다 개입", qa_run.AssertFail("x"), {DLG, REQ}, [], ["POST /a"],
+     "ERROR", "판정 불가 - 요청 차단 · 확인창 취소로 화면 흐름이 달라짐: x / 막은 요청: POST /a"),
+    # 확인창 관련 4조합의 현행 입력. 현행은 dismissed 를 보지 않는다
+    ("현행: 취소 → expect_dialog 통과(interfered 비움) → 판정 실패", qa_run.AssertFail("x"), set(), [], [],
+     "FAIL", "x"),
+    ("현행: expect_dialog 문구 불일치", qa_run.AssertFail("알럿 불일치"), set(), [], [], "FAIL", "알럿 불일치"),
+    ("현행: 판정 스텝 도중 취소(dismissed 만 남음) + 판정 실패", qa_run.AssertFail("x"), set(), ["삭제?"], [],
+     "FAIL", "x"),
+    ("현행: 확인창 뜬 뒤 expect_no_dialog 실패(interfered 켜짐)", qa_run.AssertFail("알럿이 뜸"), {DLG}, [], [],
+     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 알럿이 뜸"),
+]
+for name, exc, itf, dis, blog, want_s, want_r in FS_TABLE:
+    t("final_status: " + name, FS(exc, [], itf, dis, blog), (want_s, want_r))
+
+# -- 재실행 병합 (merge_retry) 현행 동작 ------------------------
+def res(status, reason="", shots=(), duration=1.0):
+    return {"id": "R", "status": status, "reason": reason, "shots": list(shots), "duration": duration}
+
+
+first, second = res("FAIL", "a", ["R_try1.png"], 1.2), res("PASS", "", ["R.png"], 2.3)
+m = qa_run.merge_retry(first, second)
+t("merge_retry: 실패 → 통과는 불안정", (m["status"], m["reason"]), ("FLAKY", "1차 실패, 재실행 통과 - a"))
+t("merge_retry: 시간 합산 · 1차 기록 · 스크린샷 순서",
+  (m["duration"], m["try1"], m["shots"]),
+  (3.5, {"status": "FAIL", "reason": "a", "shots": ["R_try1.png"]}, ["R_try1.png", "R.png"]))
+t("merge_retry: 입력은 그대로", (first["status"], second["status"], second["shots"]), ("FAIL", "PASS", ["R.png"]))
+m = qa_run.merge_retry(res("FAIL", "a"), res("FAIL", "b"))
+t("merge_retry: 실패 → 실패", (m["status"], m["reason"], m.get("retried"), "flaky" in m), ("FAIL", "b", True, False))
+m = qa_run.merge_retry(res("FAIL", "a"), res("ERROR", "시간 초과"))
+t("merge_retry: 실패 → 점검 필요 (현행: 2차 사유만)", (m["status"], m["reason"], m.get("retried")),
+  ("ERROR", "시간 초과", True))
+m = qa_run.merge_retry(res("ERROR", "시간 초과"), res("PASS"))
+t("merge_retry: 점검 필요 → 통과는 통과 + 재실행 통과 표시", (m["status"], m["reason"], m.get("flaky")),
+  ("PASS", "", "시간 초과"))
+
+# -- 경고 코드 묶음 (report) ----------------------------------------
+from gates import W_NO_FIX, W_ABSENCE_NO_ANCHOR, W_PRE_NO_ANCHOR, W_RESIDUE, W_SELECTOR_UPDATE, W_QA_PREFIX  # noqa: E402
+warns = [(W_NO_FIX, "A: 문장을 바꿔도"), (W_NO_FIX, "B: 묶임"), (W_ABSENCE_NO_ANCHOR, "A: x"),
+         (W_PRE_NO_ANCHOR, "C: y"), (W_QA_PREFIX, "A 스텝1: 프리픽스 없음"), ("unknown_code", "새 경고")]
+blk = report._warn_blocks(warns)
+t("경고 묶음: 스펙 점검은 코드로 묶음 (문장 무관)", "<li>fix 없음 2건: A, B</li>" in blk, True)
+t("경고 묶음: anchor 코드 둘은 한 줄", "<li>anchor 없는 판정 2건: A, C</li>" in blk, True)
+t("경고 묶음: 스펙 점검 건수", "스펙 점검 4건" in blk, True)
+t("경고 묶음: 모르는 코드 · 실행 경고는 주황", "확인할 경고 2건" in blk, True)
+todo = report._todo_html([], [], [(W_SELECTOR_UPDATE, "아무 문장"), (W_RESIDUE, "아무 문장")], 0)
+t("할 일: 셀렉터 갱신 · 잔여 데이터는 코드로", ("셀렉터 갱신 요청" in todo, "잔여 데이터 확인" in todo), (True, True))
+todo = report._todo_html([], [], [(W_QA_PREFIX, "셀렉터 갱신 필요: 테스트 데이터가 남아")], 0)
+t("할 일: 문장에 같은 말이 있어도 코드가 다르면 안 띄움",
+  ("셀렉터 갱신 요청" in todo, "잔여 데이터 확인" in todo), (False, False))
+
+
+# -- 차단 안내 (report) ---------------------------------------------
+def gate(by):
+    r = {"id": "B1", "status": "BLOCKED", "reason": "문장 무관", "blocked_by": by}
+    return report._gate_block(r, {}, "s.json")
+
+
+t("차단 안내: blocklist", "의도적으로 막아둔 것" in gate("blocklist"), True)
+t("차단 안내: 선언 누락", "쓰기 승인 선언이 없습니다" in gate("undeclared"), True)
+t("차단 안내: 잔여 점검", "읽기 스텝만" in gate("residue_write"), True)
+t("차단 안내: cleanup 없음", "정리(cleanup) 절차가 없습니다" in gate("no_cleanup"), True)
+
+
+# -- run_case 상태 전이 (브라우저 없이) ------------------------------
+class FakeRunner(qa_run.Runner):
+    """스텝의 _raise 예외를 그대로 내는 러너. _block 이 있으면 그 스텝에서 요청을 막은 것으로 친다."""
+
+    def __init__(self):
+        super().__init__(None, {"meta": {"base_url": "http://fake.local"}}, Path("fake.json"),
+                         Path("unused"), Path("unused"))
+
+    def run(self, step, case_id, idx):
+        if step.get("_block"):
+            self.blocked_log.append(step["_block"])
+            self.interfered.add(qa_run.INTERFERE_REQUEST)
+        if step.get("_pending"):
+            self.blocked.append(step["_pending"])
+        if step.get("_raise") is not None:
+            raise step["_raise"]
+
+    def _shoot(self, *a, **k):
+        pass
+
+    def _shoot_failure(self, *a, **k):
+        pass
+
+    def _anchor_visible(self, step, timeout):
+        return bool(step.get("_anchor_ok"))
+
+
+def run_fake(steps, dry_run=True, **case):
+    c = dict({"id": "K", "title": "t", "steps": steps}, **case)
+    return qa_run.run_case(FakeRunner(), c, [], dry_run)
+
+
+GOTO = {"action": "goto", "url": "/x"}
+r = run_fake([GOTO, {"action": "expect_visible", "selector": "#a"}])
+t("run_case: 전부 통과", (r["status"], r["reason"], [s["status"] for s in r["steps"]]), ("PASS", "", ["OK", "OK"]))
+r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "_raise": qa_run.AssertFail("다름")}])
+t("run_case: 판정 실패", (r["status"], r["reason"], r["steps"][-1]["status"]), ("FAIL", "다름", "FAIL"))
+r = run_fake([GOTO, {"action": "expect_visible", "selector": "#late",
+                     "_raise": qa_run.PWTimeout("Timeout 3000ms exceeded.")}])
+t("run_case: 시간 초과는 점검 필요 + timeout · err_selector",
+  (r["status"], r.get("timeout"), r.get("err_selector")), ("ERROR", True, "#late"))
+r = run_fake([GOTO, {"action": "download", "selector": "#dl",
+                     "_raise": qa_run.StepFailure("파일이 내려오지 않음 - 시간 초과 (1초)", timeout=True)}])
+t("run_case: 다운로드 대기 초과도 timeout", (r["status"], r.get("timeout"), r.get("err_selector")),
+  ("ERROR", True, "#dl"))
+r = run_fake([GOTO, {"action": "expect_visible", "selector": "#a", "_raise": qa_run.StepFailure("설정 오류")}])
+t("run_case: 시간 초과 아닌 점검 필요는 timeout 없음", (r["status"], "timeout" in r, "err_selector" in r),
+  ("ERROR", False, False))
+r = run_fake([GOTO, {"action": "click", "selector": "#tab", "write": False, "_block": "POST /api/x"},
+              {"action": "expect_text", "selector": "#a", "contains": "x", "_raise": qa_run.AssertFail("다름")}])
+t("run_case: 요청을 막은 뒤 판정 실패는 점검 필요",
+  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 요청 차단로 화면 흐름이 달라짐: 다름 / 막은 요청: POST /api/x"))
+r = run_fake([GOTO, {"action": "click", "selector": "#tab", "write": False, "_pending": "POST /api/x"}])
+t("run_case: 마지막 스텝 뒤 남은 차단은 점검 필요", (r["status"], r["reason"].startswith("서버 요청을 막음: POST /api/x")),
+  ("ERROR", True))
+r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "precondition": True, "anchor": "#b",
+                     "_anchor_ok": True, "_raise": qa_run.AssertFail("없음")}])
+t("run_case: precondition 불일치 + anchor 보임 = 조건 미충족", (r["status"], r["reason"]), ("NA", "조건 미충족 - 없음"))
+r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "precondition": True,
+                     "_raise": qa_run.PWTimeout("Timeout 3000ms exceeded.")}])
+t("run_case: precondition 시간 초과 = 조건 확인 불가 + timeout",
+  (r["status"], "조건 확인 불가 - 시간 초과" in r["reason"], r.get("timeout")), ("ERROR", True, True))
+r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "soft": True,
+                     "_raise": qa_run.AssertFail("하나")},
+              {"action": "expect_text", "selector": "#b", "contains": "y", "soft": True,
+               "_raise": qa_run.AssertFail("둘")}])
+t("run_case: soft 실패는 모아서 한 번에", (r["status"], r["reason"], len(r["steps"])), ("FAIL", "하나 / 둘", 2 + 1))
+r = run_fake([GOTO, {"action": "click", "selector": "#a", "write": False,
+                     "_raise": qa_run.WriteBlocked("막음", "blocklist")}])
+t("run_case: 화면 글자 차단", (r["status"], r["reason"], r.get("blocked_by")), ("BLOCKED", "막음", "blocklist"))
+try:
+    run_fake([GOTO, {"action": "expect_visible", "selector": "#a", "_raise": qa_run.SessionExpired("만료")}])
+    t("run_case: 세션 만료는 전체 중단", "중단 안 됨", "SessionAbort")
+except qa_run.SessionAbort as e:
+    t("run_case: 세션 만료는 전체 중단", (e.result["status"], e.result["reason"], e.result.get("aborted")),
+      ("ERROR", "세션 만료로 중단 - 만료", True))
+# 게이트
+r = qa_run.run_case(FakeRunner(), {"id": "K", "title": "t", "steps": [{"action": "click", "selector": "text=발송"}]},
+                    ["text=발송"], True)
+t("게이트: blocklist", (r["status"], r.get("blocked_by")), ("BLOCKED", "blocklist"))
+r = run_fake([GOTO, {"action": "fill", "selector": "#q", "value": "x"}])
+t("게이트: writes 선언 누락", (r["status"], r.get("blocked_by"), r["reason"]),
+  ("BLOCKED", "undeclared", "writes 선언 누락 - 스텝 2 'fill #q (값 1자)' 이 쓰기 동작"))
+r = run_fake([GOTO, {"action": "fill", "selector": "#q", "value": "x"}], writes=True)
+t("게이트: dry-run 쓰기 케이스는 건너뜀", (r["status"], "blocked_by" in r), ("SKIPPED", False))
+r = run_fake([GOTO, {"action": "fill", "selector": "#q", "value": "x"}], dry_run=False, writes=True, approved=True)
+t("게이트: cleanup 없음", (r["status"], r.get("blocked_by")), ("BLOCKED", "no_cleanup"))
+r = run_fake([{"action": "fill", "selector": "#q", "value": "x"}], dry_run=False, writes=True, approved=True,
+             cleanup=[GOTO])
+t("게이트: 승인 쓰기 첫 스텝 goto 아님", (r["status"], r.get("blocked_by")), ("BLOCKED", "first_goto"))
 
 
 # -- 지난 실행 정리 ----------------------------------------------

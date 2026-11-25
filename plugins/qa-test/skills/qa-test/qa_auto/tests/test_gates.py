@@ -7,7 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gates import (is_write_step, static_block_hit, runtime_block_hit, runtime_write_hint,  # noqa: E402
                    selector_texts, text_mismatch, count_mismatch, is_absence_check,
                    post_allowed, site_of, spec_errors, spec_warnings, path_list_errors,
-                   url_block_hit, effective_blocklist, ignored_request, get_write_suspect)
+                   url_block_hit, effective_blocklist, ignored_request, get_write_suspect,
+                   W_UNKNOWN_REQ, W_NO_FIX, W_NO_AREA, W_APPROVED_FIRST_GOTO, W_SOFT_POSITION,
+                   W_ABSENCE_NO_ANCHOR, W_PRE_NO_ANCHOR)
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -97,14 +99,25 @@ bad2 = {"cases": [{"id": "B", "source": "", "steps": []}]}
 t("source 빈 defect", len(spec_errors(bad2)), 1)
 good = {"cases": [{"id": "C", "kind": "improve", "source": "", "steps": []}]}
 t("개선 요청은 source 없어도 됨", spec_errors(good), [])
-w = spec_warnings({"cases": [{"id": "D", "source": "x", "steps": [
+w = spec_warnings({"cases": [{"id": "D", "source": "x", "fix": "f", "area": "a", "steps": [
     {"action": "expect_hidden", "selector": "#x"}]}]})
-t("부재 판정 anchor 경고", any("anchor" in x for x in w), True)
+t("부재 판정 anchor 경고", [c for c, _ in w], [W_ABSENCE_NO_ANCHOR])
 t("넓은 allow_post 는 실행 전 멈춤", len(spec_errors({"meta": {"allow_post": ["/a"]}, "cases": []})), 1)
 t("없는 blocklist_off 항목", len(spec_errors({"meta": {"blocklist_off": ["text*=삭제"]}, "cases": []})), 1)
 w2 = spec_warnings({"cases": [{"id": "E", "source": "x", "writes": True, "approved": True,
                                "steps": [{"action": "click", "selector": "#a"}]}]})
-t("승인 쓰기 케이스 첫 스텝 goto 경고", any("goto" in x for x in w2), True)
+t("승인 쓰기 케이스 첫 스텝 goto 경고", W_APPROVED_FIRST_GOTO in [c for c, _ in w2], True)
+
+# 경고 코드: 종류마다 코드 하나, 문장은 케이스 ID 로 시작 (리포트가 ID 를 떼어 묶는다)
+w3 = spec_warnings({"requirements": [{"id": "R1"}], "cases": [
+    {"id": "F", "source": "x", "req": ["R9"], "steps": [
+        {"action": "click", "selector": "#a", "soft": True},
+        {"action": "expect_text", "selector": "#b", "contains": "y", "precondition": True}]}]})
+t("경고 코드 전부", sorted(c for c, _ in w3),
+  sorted([W_UNKNOWN_REQ, W_NO_FIX, W_NO_AREA, W_SOFT_POSITION, W_PRE_NO_ANCHOR]))
+t("경고 문장은 케이스 ID 로 시작", all(x.startswith("F: ") for _, x in w3), True)
+t("경고 없음", spec_warnings({"cases": [{"id": "G", "kind": "improve", "steps": [
+    {"action": "expect_hidden", "selector": "#x", "anchor": "#list"}]}]}), [])
 
 
 if __name__ == "__main__":

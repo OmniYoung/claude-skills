@@ -338,32 +338,59 @@ def spec_errors(spec):
     return errs
 
 
+# 경고 종류 코드. 경고는 (코드, 문장) 으로 다니고 리포트는 코드로 묶는다.
+# 문장을 고쳐도 리포트 묶음 · 할 일 버튼이 깨지지 않게 하려는 것이다.
+# 스펙 점검(spec_warnings) - 리포트 '스펙 점검' 블록(회색)으로 간다
+W_UNKNOWN_REQ = "unknown_req"                  # requirements 에 없는 요건 ID
+W_NO_FIX = "no_fix"                            # defect 인데 fix 없음
+W_NO_AREA = "no_area"                          # defect 인데 area 없음
+W_APPROVED_FIRST_GOTO = "approved_first_goto"  # 승인 쓰기 케이스 첫 스텝이 goto 아님
+W_SOFT_POSITION = "soft_position"              # soft 가 expect_* 아닌 스텝에 있음
+W_ABSENCE_NO_ANCHOR = "absence_no_anchor"      # '없어야 함' 판정에 anchor 없음
+W_PRE_NO_ANCHOR = "precondition_no_anchor"     # precondition 에 anchor 없음
+# 실행 중 경고(qa_run) - 리포트 '확인할 경고' 블록(주황)으로 간다
+W_QA_PREFIX = "qa_prefix"                      # 입력값에 QA 프리픽스 없음
+W_RESIDUE = "residue"                          # 테스트 데이터가 남아 있을 수 있음 (할 일: 잔여 데이터 확인)
+W_SELECTOR_UPDATE = "selector_update"          # 같은 셀렉터가 여러 케이스에서 시간 초과 (할 일: 셀렉터 갱신 요청)
+W_NA_STREAK = "na_streak"                      # 같은 케이스가 연속 조건 미충족
+
+# BLOCKED 케이스가 왜 막혔는지 (결과의 blocked_by). 리포트 카드의 안내문을 이 값으로 고른다
+BLOCK_BLOCKLIST = "blocklist"          # blocklist 패턴 (스펙 문자열 · 화면 글자)
+BLOCK_UNDECLARED = "undeclared"        # writes 선언 없이 쓰기 동작 (스펙 판정 · 화면 글자 힌트)
+BLOCK_NO_CLEANUP = "no_cleanup"        # 쓰기 케이스인데 cleanup 없음
+BLOCK_FIRST_GOTO = "first_goto"        # 승인 쓰기 케이스 첫 스텝이 goto 아님
+BLOCK_RESIDUE_WRITE = "residue_write"  # residue_check 에 쓰기 스텝
+
+
 def spec_warnings(spec):
-    """멈추지는 않고 리포트에 경고로 남길 것."""
+    """멈추지는 않고 리포트에 경고로 남길 것. [(코드, 문장)]."""
     out = []
     reqs = {q["id"] for q in spec.get("requirements", [])}
     for c in spec.get("cases", []):
         cid = c.get("id", "?")
         for rid in c.get("req") or []:
             if reqs and rid not in reqs:
-                out.append("{}: requirements 에 없는 요건 ID '{}'".format(cid, rid))
+                out.append((W_UNKNOWN_REQ, "{}: requirements 에 없는 요건 ID '{}'".format(cid, rid)))
         if c.get("kind", "defect") == "defect":
             if not str(c.get("fix", "")).strip():
-                out.append("{}: fix(웍스 로그 한 줄)가 없어 '영역 오류: 실제 현상' 으로 대신함".format(cid))
+                out.append((W_NO_FIX, "{}: fix(웍스 로그 한 줄)가 없어 '영역 오류: 실제 현상' 으로 대신함".format(cid)))
             if not str(c.get("area", "")).strip():
-                out.append("{}: area 가 없어 웍스 로그에서 '기타' 아래로 감".format(cid))
+                out.append((W_NO_AREA, "{}: area 가 없어 웍스 로그에서 '기타' 아래로 감".format(cid)))
         if c.get("writes") and c.get("approved"):
             first = (c.get("steps") or [{}])[0]
             if first.get("action") != "goto":
-                out.append("{}: 승인 쓰기 케이스는 첫 스텝이 goto 여야 함 - 이대로면 차단".format(cid))
+                out.append((W_APPROVED_FIRST_GOTO,
+                            "{}: 승인 쓰기 케이스는 첫 스텝이 goto 여야 함 - 이대로면 차단".format(cid)))
         for st in c.get("steps", []):
             act = str(st.get("action", ""))
             if st.get("soft") and not act.startswith("expect_"):
-                out.append("{}: soft 는 expect_* 스텝에만 적용됨 ({})".format(cid, act))
+                out.append((W_SOFT_POSITION, "{}: soft 는 expect_* 스텝에만 적용됨 ({})".format(cid, act)))
             anchor = st.get("anchor") or c.get("anchor")
             if is_absence_check(st) and not anchor:
-                out.append("{}: '없어야 함' 판정({})에 anchor 가 없음 - 요소가 0개면 판정 불가로 처리".format(
-                    cid, st.get("selector", "")))
+                out.append((W_ABSENCE_NO_ANCHOR,
+                            "{}: '없어야 함' 판정({})에 anchor 가 없음 - 요소가 0개면 판정 불가로 처리".format(
+                                cid, st.get("selector", ""))))
             if st.get("precondition") and not anchor:
-                out.append("{}: precondition 에 anchor 가 없음 - 조건이 안 맞으면 점검 필요로 처리".format(cid))
+                out.append((W_PRE_NO_ANCHOR,
+                            "{}: precondition 에 anchor 가 없음 - 조건이 안 맞으면 점검 필요로 처리".format(cid)))
     return out

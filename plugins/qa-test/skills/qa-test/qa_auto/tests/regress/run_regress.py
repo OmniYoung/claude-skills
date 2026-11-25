@@ -15,6 +15,7 @@
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ RUNNER = QA / "qa_run.py"
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(QA))
 import make_specs  # noqa: E402
+import qa_run  # noqa: E402  사유 문장 상수 (REASON_*)
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -141,6 +143,20 @@ def no_writes(label, ran, writes):
     check(label, ran and not writes, "실행 안 됨" if not ran else "서버 쓰기 {}".format(writes))
 
 
+def has_reason(res, cid, template):
+    """케이스 사유가 qa_run 의 사유 상수 문장을 담는지. 자리표시({...})를 뺀 고정 부분이 모두 있어야 한다.
+
+    문장을 qa_run 에서 고치면 기대값도 같이 따라간다 (문자열을 여기에 따로 적지 않는다).
+    """
+    reason = res.get(cid, {}).get("reason", "")
+    parts = [p for p in re.split(r"\{[^}]*\}", template) if len(p.strip()) >= 2]
+    return bool(parts) and all(p in reason for p in parts)
+
+
+def reason_of(res, cid):
+    return res.get(cid, {}).get("reason", "")
+
+
 def text(folder, name):
     p = folder / name if folder else None
     return p.read_text(encoding="utf-8") if p and p.exists() else ""
@@ -172,7 +188,7 @@ def sc_live():
     code, f, meta, res, out, w = run("live")
     ran = expect_status("live: 선언 없는 쓰기 차단", res, {"N1": "BLOCKED", "N2": "BLOCKED", "N3": "PASS"})
     no_writes("live: 서버 쓰기 0", ran, w)
-    check("live: N1 사유 '선언 누락'", "선언 누락" in res.get("N1", {}).get("reason", ""), res.get("N1", {}).get("reason", ""))
+    check("live: N1 사유 '선언 누락'", has_reason(res, "N1", qa_run.REASON_UNDECLARED), reason_of(res, "N1"))
 
 
 @scenario
@@ -194,7 +210,8 @@ def sc_approved():
 def sc_allowpost():
     code, f, meta, res, out, w = run("allowpost_off", "--dry-run")
     expect_status("allow_post 없음: POST 조회 차단", res, {"A1": "ERROR"})
-    check("allow_post 없음: 사유에 allow_post 안내", "allow_post" in res.get("A1", {}).get("reason", ""))
+    check("allow_post 없음: 사유에 allow_post 안내", has_reason(res, "A1", qa_run.REASON_REQUEST_BLOCKED),
+          reason_of(res, "A1"))
     code, f, meta, res, out, w = run("allowpost_on", "--dry-run")
     expect_status("allow_post 있음: POST 조회 통과", res, {"A2": "PASS"})
     code, f, meta, res, out, w = run("ap_method", "--dry-run", "--no-retry")
@@ -226,8 +243,7 @@ def sc_late():
     ran = expect_status("late: 막은 뒤의 실패는 판정 불가", res, {"L1": "ERROR", "L2": "ERROR", "X1": "ERROR"})
     no_writes("late: 서버 쓰기 0", ran, w)
     check("late: 개발 전달 0건", "미반영 오류 0건" in text(f, "웍스등록.txt"), text(f, "웍스등록.txt")[:120])
-    check("late: 사유에 '화면 흐름이 달라짐'", "화면 흐름" in res.get("L2", {}).get("reason", ""),
-          res.get("L2", {}).get("reason", ""))
+    check("late: 사유에 '화면 흐름이 달라짐'", has_reason(res, "L2", qa_run.REASON_INTERFERED), reason_of(res, "L2"))
 
 
 @scenario
