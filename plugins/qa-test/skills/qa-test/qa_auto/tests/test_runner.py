@@ -87,9 +87,16 @@ line = nofix([("expect_count", "tr", "개수 불일치 - 기대:3 / 실제:2")],
 t("fix 없음: 따옴표 없는 기대값은 감쌈", line, "목록 오류: '2' 노출 (SB: '3') · TC-9")
 line = nofix([("expect_box", "#chat", "크기·위치 불일치 - #chat: 너비 200px (기대 300px 이상) / "
                "#banner 오른쪽에 있지 않음 (경계에서 500px 안쪽)")])
-t("fix 없음: 기대 · 실제 없으면 현상 앞 40자… (SB: 근거), 셀렉터 · 제목 · action 이름 없음",
+t("fix 없음: 크기 · 위치 '(기대 …)' 는 '실제' (SB: '기대'), 셀렉터 · 제목 · action 이름 없음",
   (line, "#chat" in line, "expect_box" in line, "크기·위치 실패" in line),
-  ("화면 오류: 크기·위치 불일치 - 너비 200px (기대 300px 이상)… (SB: 스모크) · TC-9", False, False, False))
+  ("화면 오류: '너비 200px' (SB: '300px 이상') · TC-9", False, False, False))
+line = nofix([("expect_box", "#chat", "크기·위치 불일치 - #chat: #banner 오른쪽에 있지 않음 (경계에서 500px 안쪽) / "
+               "#banner 과의 간격 40px (기대 0~16px)")], area="상담")
+t("fix 없음: '(기대 …)' 가 둘째 항목이어도 그 항목", line, "상담 오류: '#banner 과의 간격 40px' (SB: '0~16px') · TC-9")
+line = nofix([("expect_box", "#chat", "크기·위치 불일치 - #chat: #banner 오른쪽에 있지 않음 (경계에서 500px 안쪽) / "
+               "높이 0px")])
+t("fix 없음: 기대 · 실제 · '(기대 …)' 모두 없으면 현상 앞 40자… (SB: 근거)", line,
+  "화면 오류: 크기·위치 불일치 - #banner 오른쪽에 있지 않음 (경계에서… (SB: 스모크) · TC-9")
 line = nofix([("expect_visible", "#x", "안 보임")], area="상단")
 t("fix 없음: 짧은 현상은 말줄임 없이", line, "상단 오류: 안 보임 (SB: 스모크) · TC-9")
 
@@ -164,6 +171,13 @@ for itf in ({REQ}, {qa_run.INTERFERE_POPUP}, {REQ, DLG}, {DLG}):
 t("판정 불가 · 조건 확인 불가 문장의 앞부분이 같음 (안전망 개입 … 실제와 다름. … 이후 결과:)",
   (qa_run.REASON_INTERFERED.split(" - ", 1)[1], qa_run.REASON_PRE_INTERFERED.split(" - ", 1)[1]),
   (qa_run.REASON_PRE_INTERFERED.split(" - ", 1)[1],) * 2)
+# 기획자가 읽는 사유 · 경고 · 신호 문장에 스텝 이름 · 설정 키 없음 (write:false · blocklist · dry-run 은 쓰는 말)
+INTERNAL = ("expect_", "approved", "writes", "cleanup", "residue", "precondition", "anchor", "allow_post",
+            "goto", "ignore_requests", "login_check")
+said = {k: getattr(qa_run, k) for k in dir(qa_run)
+        if k.startswith(("REASON_", "WARN_", "SIGNAL_")) and isinstance(getattr(qa_run, k), str)}
+t("사유 · 경고 · 신호 상수 {}개에 내부 용어 0".format(len(said)),
+  {k: [w for w in INTERNAL if w in v] for k, v in said.items() if any(w in v for w in INTERNAL)}, {})
 
 # -- 재실행 병합 (merge_retry) 현행 동작 ------------------------
 def res(status, reason="", shots=(), duration=1.0):
@@ -414,8 +428,8 @@ r = qa_run.run_case(FakeRunner(), {"id": "K", "title": "t", "steps": [{"action":
                     ["text=발송"], True)
 t("게이트: blocklist", (r["status"], r.get("blocked_by")), ("BLOCKED", "blocklist"))
 r = run_fake([GOTO, {"action": "fill", "selector": "#q", "value": "x"}])
-t("게이트: writes 선언 누락", (r["status"], r.get("blocked_by"), r["reason"]),
-  ("BLOCKED", "undeclared", "writes 선언 누락 - 스텝 2 'fill #q (값 1자)' 이 쓰기 동작"))
+t("게이트: 쓰기 선언 누락", (r["status"], r.get("blocked_by"), r["reason"]),
+  ("BLOCKED", "undeclared", "쓰기 선언 누락 - 스텝 2 'fill #q (값 1자)' 이 쓰기 동작"))
 r = run_fake([GOTO, {"action": "fill", "selector": "#q", "value": "x"}], writes=True)
 t("게이트: dry-run 쓰기 케이스는 건너뜀", (r["status"], "blocked_by" in r), ("SKIPPED", False))
 r = run_fake([GOTO, {"action": "fill", "selector": "#q", "value": "x"}], dry_run=False, writes=True, approved=True)

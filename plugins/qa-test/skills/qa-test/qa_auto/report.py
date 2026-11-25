@@ -272,8 +272,9 @@ def _phenomenon(r):
 def _no_fix_line(r):
     """fix 가 없는 결함의 웍스 한 줄. 테스트 제목 · 셀렉터 · 스텝 이름은 쓰지 않는다.
 
-    기대 · 실제가 있으면 `{영역} 오류: '{실제}' 노출 (SB: {기대})`,
-    없으면 `{영역} 오류: {현상 앞 40자}… (SB: {근거})`. 영역이 없으면 '화면'.
+    기대 · 실제가 있으면 `{영역} 오류: '{실제}' 노출 (SB: {기대})`, 크기 · 위치처럼 `실제 (기대 값)` 이면
+    `{영역} 오류: '{실제}' (SB: '{값}')`, 둘 다 없으면 `{영역} 오류: {현상 앞 40자}… (SB: {근거})`.
+    영역이 없으면 '화면'.
     """
     area = (r.get("area") or "").strip() or "화면"
     exp = _expected_value(r)
@@ -282,6 +283,10 @@ def _no_fix_line(r):
         act = act if len(act) <= 60 else act[:60] + "…"
         return "{} 오류: '{}' 노출 (SB: {})".format(area, act, exp)
     ph = re.sub(r"\s+", " ", _phenomenon(r)).strip()
+    # 크기 · 위치 메시지 '… - 너비 200px (기대 300px 이상) / …' 의 첫 항목
+    m = re.search(r"(?:^|- |/ )([^-/(]+?)\s*\(기대 ([^)]+)\)", ph)
+    if m:
+        return "{} 오류: '{}' (SB: '{}')".format(area, m.group(1).strip(), m.group(2).strip())
     if len(ph) > 40:
         # 다음 현상(" / ") 또는 낱말 경계에서 자른다. 낱말 중간 · 셀렉터 조각에서 끊기지 않게
         cut = ph[:41]

@@ -330,16 +330,16 @@ class SessionAbort(Exception):
 
 # 게이트 (실행 전)
 REASON_BLOCKLIST = "blocklist 패턴 '{}' 매칭 - 실행 거부"
-REASON_UNDECLARED = "writes 선언 누락 - {phase}스텝 {n} '{label}' 이 쓰기 동작"
+REASON_UNDECLARED = "쓰기 선언 누락 - {phase}스텝 {n} '{label}' 이 쓰기 동작"
 REASON_UNDECLARED_CLEANUP = "정리 "          # REASON_UNDECLARED 의 {phase} (정리 스텝일 때)
 REASON_DRY_RUN = "dry-run 모드 - 쓰기 케이스 건너뜀"
-REASON_UNAPPROVED = "쓰기 미승인 - 케이스에 approved:true 필요"
-REASON_NO_CLEANUP = "쓰기 케이스인데 cleanup 스텝이 없음 - 실행 거부"
-REASON_FIRST_GOTO = "승인 쓰기 케이스는 첫 스텝이 goto 여야 함 - 실행 거부"
-REASON_RESIDUE_WRITE = "residue_check 에 쓰기 스텝이 있음 - 읽기만 가능"
+REASON_UNAPPROVED = "쓰기 미승인 - 실행하려면 이 케이스의 쓰기 승인이 필요"
+REASON_NO_CLEANUP = "쓰기 케이스인데 정리 스텝(만든 데이터 지우기)이 없음 - 실행 거부"
+REASON_FIRST_GOTO = "승인 쓰기 케이스는 첫 스텝이 페이지 열기여야 함 - 실행 거부"
+REASON_RESIDUE_WRITE = "잔여 데이터 점검 스텝에 쓰기 동작이 있음 - 읽기만 가능"
 # 실행 중 (화면 글자로 막음)
 REASON_RUNTIME_BLOCKLIST = "blocklist 패턴 '{}' 와 같은 버튼 - 실행 거부"
-REASON_RUNTIME_WRITE = ("버튼 글자 '{shown}' 에 '{hint}' 이 있어 쓰기 동작으로 판정 - writes·approved 선언 필요. "
+REASON_RUNTIME_WRITE = ("버튼 글자 '{shown}' 에 '{hint}' 이 있어 쓰기 동작으로 판정 - 쓰기 선언 · 승인이 필요합니다. "
                         "조회 버튼이면 스텝에 write:false")
 # 안전망
 INTERFERE_REQUEST = "요청 차단"     # runner.interfered 에 넣는 값. REASON_INTERFERED 의 {what} 에 들어간다
@@ -353,14 +353,19 @@ REASON_REQUEST_BLOCKED = "안전망이 서버 요청을 막음: {}. 조회 · �
 REASON_WRITE_FALSE_SENT = ("write:false 로 둔 버튼이 서버 요청을 보냄: {} - 조회 요청인지, "
                            "입력 검증 누락(결함 후보)인지 확인이 필요합니다.")
 REASON_GUARD_ERROR = "안전망 처리 오류로 막음: {} {}"
-REASON_DIALOG_DISMISSED = ("확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 문구만 확인하려면 "
-                           "다음 스텝에 expect_dialog 를 둔다")
+REASON_DIALOG_DISMISSED = ("확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 확인창 문구만 보는 케이스면 "
+                           "Claude 에게 \"확인창 문구 확인 스텝 넣어줘\" 라고 요청합니다.")
+# 화면 확인 스크립트(expect_js)가 보낸 서버 요청은 승인 케이스여도 막는다
+REASON_JS_BLOCKED = "화면 확인 스크립트가 서버 요청을 보내려 해서 막음: {}"
 # {what} 은 INTERFERE_* 를 " · " 로 이은 것. "개입으로" 로 받아 {what} 끝 글자 받침과 상관없이 조사가 맞는다
 REASON_INTERFERED = "판정 불가 - 안전망 개입({what})으로 화면 흐름이 실제와 다름. {blocked}이후 결과: {reason}"
 REASON_INTERFERED_BLOCKED = "막은 요청: {} · "   # REASON_INTERFERED 의 {blocked} (막은 요청이 있을 때)
 # 판정 결과
 REASON_TIMEOUT = "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 ({})"
 REASON_DOWNLOAD_TIMEOUT = "파일이 내려오지 않음 - 시간 초과 ({}초)"
+REASON_NOT_FOUND = "요소를 찾지 못함: {} - 셀렉터가 바뀌었거나 화면이 덜 그려졌을 수 있음"
+REASON_ANCHOR_HIDDEN = "기준 요소가 안 보임: {} - 화면이 덜 그려졌거나 셀렉터가 바뀌었을 수 있음"
+REASON_ANCHOR_GONE = "관찰 중에 기준 요소가 사라짐: {} - 화면이 바뀌어 판정 불가"
 # 리포트 중단 알림과 같은 문장. {} 는 SessionExpired 문장 (중단 시점 주소, 직전에 막은 요청)
 REASON_SESSION = "로그인이 풀려 중단됨 - login_qa.bat 으로 다시 로그인한 뒤 실행합니다. {}"
 SESSION_AT = "(중단 시점 주소: {})"      # SessionExpired 문장 앞부분
@@ -369,11 +374,11 @@ SESSION_AT = "(중단 시점 주소: {})"      # SessionExpired 문장 앞부분
 REASON_SESSION_BLOCKED = ("직전에 막은 요청: {} - 로그인 유지 요청이면 다시 로그인해도 같은 결과가 납니다. "
                           "Claude 에게 \"막힌 요청 분류해줘\" 라고 요청합니다.")
 REASON_NA = "조건 미충족 - {}"
-REASON_PRE_UNKNOWN = "조건 확인 불가 - {} (anchor 가 없거나 안 보임)"
+REASON_PRE_UNKNOWN = "조건 확인 불가 - {} (기준 요소가 없거나 안 보임)"
 REASON_PRE_INTERFERED = "조건 확인 불가 - 안전망 개입({what})으로 화면 흐름이 실제와 다름. {blocked}이후 결과: {reason}"
-REASON_PRE_WRITE = "precondition 스텝은 읽기만 가능: {}"
-REASON_ABSENCE_UNKNOWN = "부재 판정 불가 - {} 가 0개인데 anchor 가 없어 셀렉터가 맞는지 알 수 없음"
-REASON_CLEANUP_FAIL = " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}"
+REASON_PRE_WRITE = "조건 확인 스텝은 읽기만 가능: {}"
+REASON_ABSENCE_UNKNOWN = "부재 판정 불가 - {} 가 0개인데 기준 요소가 없어 셀렉터가 맞는지 알 수 없음"
+REASON_CLEANUP_FAIL = " / [!] 정리 실패 - 생성 데이터 수동 확인 필요: {}"
 REASON_FLAKY = "1차 실패, 재실행 통과 - {}"
 REASON_RETRY_ERROR = "1차 실패: {first} / 재실행: {second}"   # 1차 FAIL · 재실행 ERROR (상태는 ERROR)
 # 경고 (코드는 gates.W_*)
@@ -381,8 +386,11 @@ WARN_QA_PREFIX = "{} 스텝{}: 입력값 '{}'에 QA 프리픽스({})가 없음 -
 WARN_RESIDUE = "테스트 데이터가 남아 있을 수 있음 - 수동 확인 필요: {}"
 WARN_SELECTOR_UPDATE = ("셀렉터 갱신 필요: {} 가 {}건에서 시간 초과 - 화면 구조가 바뀐 것으로 보임. "
                         "Claude 에게 '{} 셀렉터 갱신해줘' 라고 요청")
-WARN_NA_STREAK = ("{}: {}회 연속 조건 미충족 - precondition 이 실제 결함을 가리고 있지 않은지 "
+WARN_NA_STREAK = ("{}: {}회 연속 조건 미충족 - 조건 확인 스텝이 실제 결함을 가리고 있지 않은지 "
                   "다른 경로로 확인 필요")
+# 판정에 영향 없는 신호 (results.json signals)
+SIGNAL_POPUP = "새 창이 열림 - 그 창의 요청은 막음 (팝업 화면은 검수 대상 아님)"
+SIGNAL_WEBSOCKET = "웹소켓 연결 (안전망 밖 - 이 연결로 보내는 쓰기는 막지 못함): {}"
 # 콘솔 끝 요약 (bat 창). bat 사용자는 콘솔만 보고 닫는 경우가 많아 위험 신호도 여기 싣는다
 CONSOLE_RESULT = ("[*] 결과: 통과 {PASS} / 실패 {FAIL} / 점검 필요 {ERROR} / 불안정 {FLAKY} / 조건 미충족 {NA} / "
                   "차단 {BLOCKED} / 승인 대기 {SKIPPED} / 전체 {total}")
@@ -629,15 +637,14 @@ class Runner:
         page.on("console", self._on_console)
         page.on("response", self._on_response)
         # 웹소켓으로 보내는 데이터는 안전망이 막지 못한다. 연결이 있었다는 것만 남긴다
-        page.on("websocket", lambda ws: self._signal(
-            "웹소켓 연결 (안전망 밖 - 이 연결로 보내는 쓰기는 막지 못함): {}".format(ws.url[:120])))
+        page.on("websocket", lambda ws: self._signal(SIGNAL_WEBSOCKET.format(ws.url[:120])))
 
     opening = False    # 러너가 직접 새 페이지를 여는 중 (진단용)
 
     def on_new_page(self, pg):
         """새 창(팝업)이 열리면 신호만 남긴다. 그 창의 요청은 _route 가 막는다."""
         if not self.opening and pg is not self.page:
-            self._signal("새 창이 열림 - 그 창의 요청은 막음 (팝업 화면은 검수 대상 아님)")
+            self._signal(SIGNAL_POPUP)
 
     def _signal(self, s):
         if s not in self.signals and len(self.signals) < 20:
@@ -963,7 +970,7 @@ class Runner:
             except Exception:
                 still = False
             if not still:
-                raise StepFailure("관찰 중에 기준 요소(anchor)가 사라짐: {} - 화면이 바뀌어 판정 불가".format(anchor))
+                raise StepFailure(REASON_ANCHOR_GONE.format(anchor))
         return None
 
     def _anchor_of(self, step):
@@ -992,7 +999,7 @@ class Runner:
         """
         anchor = self._anchor_of(step)
         if anchor and not self._anchor_visible(step, timeout):
-            raise StepFailure("기준 요소(anchor)가 안 보임: {} - 화면이 덜 그려졌거나 셀렉터가 바뀌었을 수 있음".format(anchor))
+            raise StepFailure(REASON_ANCHOR_HIDDEN.format(anchor))
         return bool(anchor)
 
     def _missing(self, sel, step, what):
@@ -1000,7 +1007,7 @@ class Runner:
         anchor = self._anchor_of(step)
         if anchor and self._anchor_visible(step, 1000):
             raise AssertFail("{} 없음: {} (기준 요소 {} 는 보임)".format(what, sel, anchor))
-        raise StepFailure("요소를 찾지 못함: {} - 셀렉터가 바뀌었거나 화면이 덜 그려졌을 수 있음".format(sel))
+        raise StepFailure(REASON_NOT_FOUND.format(sel))
 
     # -- 쓰기 판정 (실행 직전) ---------------------------------
 
@@ -1441,7 +1448,7 @@ class Runner:
             self.js_guard = False
         if self.blocked:
             lines, self.blocked = self.blocked, []
-            raise StepFailure("expect_js 가 서버 요청을 보내려 해서 막음: {}".format(" / ".join(lines[:3])))
+            raise StepFailure(REASON_JS_BLOCKED.format(" / ".join(lines[:3])))
         return value
 
 

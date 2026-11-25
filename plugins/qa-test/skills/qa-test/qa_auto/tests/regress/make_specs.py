@@ -417,6 +417,39 @@ SPECS["m2"] = {"meta": meta("rg_shared"), "cases": [
 ]}
 
 
+# -- 4차 묶음 5: 회귀 마감 (A-13) -------------------------------------
+B5 = "b5.html"
+QA_NAME = "[QA] 미정리 확인"
+
+# 정리만 실패: 본 테스트는 통과, 정리 스텝의 삭제 버튼이 없음 → 점검 필요 · 할 일 '운영 데이터 미정리' · 입력값
+SPECS["unclean"] = {"meta": meta("rg_unclean"), "cases": [
+    case("UC1", "저장은 되고 정리만 실패",
+         [G(B5), {"action": "fill", "selector": "#name", "value": QA_NAME},
+          {"action": "click", "selector": "#save", "write": True},
+          {"action": "expect_text", "selector": "#marker", "contains": "saved"}],
+         writes=True, approved=True,
+         cleanup=[G(B5), {"action": "click", "selector": "#del-row", "write": True, "timeout": 800}]),
+]}
+
+# 브라우저 강제 종료: 2번째 케이스가 여는 주소에서 서버가 러너의 브라우저를 끈다 (repro 5 의 케이스 밖 중단)
+SPECS["crash"] = {"meta": meta("rg_crash"), "cases": [
+    case("CR1", "종료 전 케이스", [G(B5), {"action": "expect_visible", "selector": "#title"}]),
+    case("CR2", "브라우저가 꺼지는 케이스", [G("api/killbrowser")]),
+    case("CR3", "종료 뒤 케이스", [G(B5), {"action": "expect_visible", "selector": "#title"}]),
+]}
+
+# 깨진 results.json 뒤 다음 실행 (repro 4)
+SPECS["broken"] = {"meta": meta("rg_broken"), "cases": [
+    case("OK1", "제목 보임", [G(B5), {"action": "expect_visible", "selector": "#title"}]),
+]}
+
+# 웹소켓 연결은 막지 못하므로 신호만 남김
+SPECS["wsock"] = {"meta": meta("rg_wsock"), "cases": [
+    case("WS1", "웹소켓을 여는 화면", [G(B5 + "?ws=1"), {"action": "wait", "ms": 800},
+                                 {"action": "expect_visible", "selector": "#title"}]),
+]}
+
+
 def build(base):
     """서버 주소를 넣은 스펙들."""
     text = json.dumps(SPECS, ensure_ascii=False).replace(B, base)

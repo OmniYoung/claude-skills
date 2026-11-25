@@ -11,9 +11,13 @@
 
 스펙과 결과는 실행마다 새 임시 폴더에 쓴다. 플러그인 폴더에는 아무것도 쓰지 않고,
 다른 실행과 포트 · 폴더가 겹치지 않는다. 브라우저는 한 번에 하나만 띄운다(시나리오를 차례로).
+브라우저 강제 종료 시나리오(crash)는 지금 도는 러너 프로세스의 자손 크롬만 끈다 (Windows 전용).
 """
 
 import argparse
+import base64
+import hashlib
+import html
 import json
 import re
 import shutil
@@ -34,6 +38,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(QA))
 import make_specs  # noqa: E402
 import qa_run  # noqa: E402  사유 문장 상수 (REASON_*)
+import gates  # noqa: E402  차단 코드 (BLOCK_*)
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -42,7 +47,62 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 WRITES = []           # 서버가 받은 쓰기 ("POST saved", "GET toggle" ...)
-WORK = {}             # tmp, specs, base
+WORK = {}             # tmp, specs, base, pid(실행 중인 러너), killed(강제 종료한 브라우저 프로세스 수)
+
+
+def _process_rows():
+    """(pid, 부모 pid, 실행 파일 이름) 목록. Windows 프로세스 스냅샷 (외부 프로그램 없이)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)       # TH32CS_SNAPPROCESS
+    e = Entry()
+    e.dwSize = ctypes.sizeof(Entry)
+    rows = []
+    ok = k32.Process32FirstW(snap, ctypes.byref(e))
+    while ok:
+        rows.append((e.th32ProcessID, e.th32ParentProcessID, e.szExeFile))
+        ok = k32.Process32NextW(snap, ctypes.byref(e))
+    k32.CloseHandle(snap)
+    return rows
+
+
+def kill_runner_browser():
+    """지금 도는 러너(WORK['pid'])의 자손 중 크롬 프로세스만 강제 종료한다. 시스템 브라우저 · 다른 프로세스는 안 건드림."""
+    import ctypes
+    root = WORK.get("pid")
+    if not root:
+        return 0
+    kids = {}
+    for pid, ppid, exe in _process_rows():
+        if pid != ppid:
+            kids.setdefault(ppid, []).append((pid, exe.lower()))
+    found, todo, seen = [], [root], {root}
+    while todo:
+        for pid, exe in kids.get(todo.pop(), []):
+            if pid in seen:
+                continue
+            seen.add(pid)
+            todo.append(pid)
+            if "chrom" in exe or "headless" in exe:
+                found.append(pid)
+    k32 = ctypes.windll.kernel32
+    for pid in found:
+        h = k32.OpenProcess(0x1, False, pid)          # PROCESS_TERMINATE
+        if h:
+            k32.TerminateProcess(h, 1)
+            k32.CloseHandle(h)
+    WORK["killed"] = WORK.get("killed", 0) + len(found)
+    return len(found)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -66,6 +126,29 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/api/killbrowser":
+            # 브라우저 강제 종료 픽스처. 응답 전에 러너의 브라우저를 끈다 (요청한 페이지는 응답을 못 받음)
+            kill_runner_browser()
+            try:
+                self.send_response(204)
+                self.end_headers()
+            except Exception:
+                pass
+            return
+        if path == "/ws":
+            # 웹소켓 연결 수락만 한다 (판정 무관 신호 픽스처). 1초 뒤 닫음
+            key = self.headers.get("Sec-WebSocket-Key", "")
+            acc = base64.b64encode(hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+            try:
+                self.wfile.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                                 "Sec-WebSocket-Accept: {}\r\n\r\n".format(acc).encode())
+                self.wfile.flush()
+                time.sleep(1.0)
+            except Exception:
+                pass
+            self.close_connection = True
+            return
         if path.startswith("/slow/"):
             # 다음 페이지 응답을 1.5초 늦춘다. 앞 문서가 그동안 살아 있으며 타이머를 돌린다 (케이스 경계)
             time.sleep(1.5)
@@ -125,9 +208,14 @@ def run(spec, *flags):
     last = out / "_last_run.txt"
     if last.exists():
         last.unlink()
-    p = subprocess.run([sys.executable, str(RUNNER), str(WORK["specs"] / (spec + ".json"))] + list(flags),
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       cwd=str(WORK["tmp"]))
+    p = subprocess.Popen([sys.executable, str(RUNNER), str(WORK["specs"] / (spec + ".json"))] + list(flags),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                         errors="replace", cwd=str(WORK["tmp"]))
+    WORK["pid"] = p.pid          # 브라우저 강제 종료 픽스처가 이 러너의 자손만 찾는다
+    try:
+        stdout, stderr = p.communicate()
+    finally:
+        WORK["pid"] = None
     folder = None
     if last.exists():
         folder = out / last.read_text(encoding="cp949").strip()
@@ -136,10 +224,13 @@ def run(spec, *flags):
         data = json.loads((folder / "results.json").read_text(encoding="utf-8"))
         meta = data.get("meta", {})
         res = {r["id"]: r for r in data["results"]}
-    return p.returncode, folder, meta, res, p.stdout + p.stderr, list(WRITES)
+    return p.returncode, folder, meta, res, stdout + stderr, list(WRITES)
 
 
 CHECKS = []
+CUR = {"sc": ""}            # 지금 도는 시나리오 이름
+WANT_BAD = set()            # (시나리오, 케이스) - ERROR · BLOCKED 를 기대한 것
+REASON_SEEN = set()         # (시나리오, 케이스) - 사유 상수 · blocked_by 코드까지 본 것
 
 
 def check(name, ok, detail=""):
@@ -151,7 +242,11 @@ def statuses(res):
 
 
 def expect_status(label, res, want):
-    """기대한 케이스가 실제로 돌았는지 먼저 본다. 빈 결과로 '쓰기 0' 같은 검사가 통과하면 안 된다."""
+    """기대한 케이스가 실제로 돌았는지 먼저 본다. 빈 결과로 '쓰기 0' 같은 검사가 통과하면 안 된다.
+
+    ERROR · BLOCKED 기대값은 사유 검사(has_reason · reason_is)도 있어야 한다. main 끝에서 대조한다.
+    """
+    WANT_BAD.update((CUR["sc"], k) for k, v in want.items() if v in ("ERROR", "BLOCKED"))
     got = statuses(res)
     missing = [k for k in want if k not in got]
     if missing:
@@ -171,9 +266,21 @@ def has_reason(res, cid, template):
 
     문장을 qa_run 에서 고치면 기대값도 같이 따라간다 (문자열을 여기에 따로 적지 않는다).
     """
+    REASON_SEEN.add((CUR["sc"], cid))
     reason = res.get(cid, {}).get("reason", "")
     parts = [p for p in re.split(r"\{[^}]*\}", template) if len(p.strip()) >= 2]
     return bool(parts) and all(p in reason for p in parts)
+
+
+def reason_is(label, res, want):
+    """{케이스: (사유 상수, 사유에 더 있어야 할 글자 또는 None, blocked_by 코드 또는 None)} 를 한 번에 본다."""
+    for cid, (template, extra, by) in want.items():
+        r = res.get(cid, {})
+        ok = has_reason(res, cid, template) and (extra is None or extra in r.get("reason", ""))
+        if by is not None:
+            ok = ok and r.get("blocked_by") == by
+        check("{}: {} 사유".format(label, cid), ok,
+              "{} / blocked_by {}".format(r.get("reason", "(결과 없음)")[:200], r.get("blocked_by")))
 
 
 def reason_of(res, cid):
@@ -207,7 +314,16 @@ def sc_dry():
     check("dry: S7 write:false 저장 클릭 사유", has_reason(res, "S7", qa_run.REASON_WRITE_FALSE_SENT),
           reason_of(res, "S7"))
     check("dry: S13 케이스 anchor body 는 anchor 없음 (요소를 찾지 못함)",
-          "요소를 찾지 못함" in reason_of(res, "S13"), reason_of(res, "S13"))
+          has_reason(res, "S13", qa_run.REASON_NOT_FOUND), reason_of(res, "S13"))
+    reason_is("dry", res, {
+        "S1": (qa_run.REASON_RUNTIME_WRITE, "'승인'", gates.BLOCK_UNDECLARED),
+        "S2": (qa_run.REASON_RUNTIME_WRITE, "'처리'", gates.BLOCK_UNDECLARED),
+        "S3": (qa_run.REASON_JS_BLOCKED, "what=saved", None),
+        "S4": (qa_run.REASON_JS_BLOCKED, "what=form", None),
+        "S6": (qa_run.REASON_BLOCKLIST, "'withdraw'", gates.BLOCK_BLOCKLIST),
+        "S8": (qa_run.REASON_UNDECLARED, "text=저장", gates.BLOCK_UNDECLARED),
+        "S10": (qa_run.REASON_NOT_FOUND, "#typo-not-exist", None),
+        "S11": (qa_run.REASON_ABSENCE_UNKNOWN, "#typo-not-exist", None)})
     n = {k: sum(1 for r in res.values() if r["status"] == k) for k in ("BLOCKED", "SKIPPED")}
     check("dry: 콘솔 결과 줄에 차단 · 승인 대기 건수 (R3-28)",
           " / 차단 {} / 승인 대기 {} / 전체 {}".format(n["BLOCKED"], n["SKIPPED"], len(res)) in out, out[-300:])
@@ -219,6 +335,8 @@ def sc_live():
     ran = expect_status("live: 선언 없는 쓰기 차단", res, {"N1": "BLOCKED", "N2": "BLOCKED", "N3": "PASS"})
     no_writes("live: 서버 쓰기 0", ran, w)
     check("live: N1 사유 '선언 누락'", has_reason(res, "N1", qa_run.REASON_UNDECLARED), reason_of(res, "N1"))
+    reason_is("live", res, {"N1": (qa_run.REASON_UNDECLARED, None, gates.BLOCK_UNDECLARED),
+                            "N2": (qa_run.REASON_RUNTIME_WRITE, "'저장'", gates.BLOCK_UNDECLARED)})
 
 
 @scenario
@@ -226,6 +344,8 @@ def sc_block():
     code, f, meta, res, out, w = run("block")
     ran = expect_status("block: 화면 글자로 blocklist", res, {"B1": "BLOCKED", "B2": "BLOCKED"})
     no_writes("block: 서버 쓰기 0", ran, w)
+    reason_is("block", res, {"B1": (qa_run.REASON_RUNTIME_BLOCKLIST, "'text=승인'", gates.BLOCK_BLOCKLIST),
+                             "B2": (qa_run.REASON_RUNTIME_BLOCKLIST, "'text=저장'", gates.BLOCK_BLOCKLIST)})
 
 
 @scenario
@@ -234,6 +354,7 @@ def sc_approved():
     ran = expect_status("approved: 승인된 쓰기", res, {"W1": "PASS", "W2": "ERROR", "W3": "PASS"})
     check("approved: 서버 쓰기 정확히 2회 (W1 저장 · W3 삭제, 재실행 없음)",
           ran and sorted(w) == ["POST deleted", "POST saved"], "쓰기 {}".format(w))
+    reason_is("approved", res, {"W2": (qa_run.REASON_JS_BLOCKED, "what=saved", None)})
 
 
 @scenario
@@ -251,6 +372,9 @@ def sc_allowpost():
     ran = expect_status("allow_post: PUT · DELETE · 쿼리 우회는 차단", res,
                         {"R1a": "ERROR", "R1b": "ERROR", "R1c": "ERROR"})
     no_writes("allow_post: 서버 쓰기 0", ran, w)
+    reason_is("allow_post", res, {"R1a": (qa_run.REASON_WRITE_FALSE_SENT, "PUT /api/write?what=put", None),
+                                  "R1b": (qa_run.REASON_REQUEST_BLOCKED, "DELETE /api/write?what=delete", None),
+                                  "R1c": (qa_run.REASON_REQUEST_BLOCKED, "POST /api/write?what=allowpost", None)})
 
 
 @scenario
@@ -258,6 +382,7 @@ def sc_confirm():
     code, f, meta, res, out, w = run("confirm", "--dry-run")
     ran = expect_status("confirm: 확인창 취소", res, {"C1": "PASS", "C2": "ERROR"})
     no_writes("confirm: 서버 쓰기 0", ran, w)
+    reason_is("confirm", res, {"C2": (qa_run.REASON_DIALOG_DISMISSED, "'삭제하시겠습니까?'", None)})
 
 
 @scenario
@@ -300,6 +425,10 @@ def sc_late():
     no_writes("late: 서버 쓰기 0", ran, w)
     check("late: 개발 전달 0건", "미반영 오류 0건" in text(f, "웍스등록.txt"), text(f, "웍스등록.txt")[:120])
     check("late: 사유에 '판정 불가 - 안전망 개입'", has_reason(res, "L2", qa_run.REASON_INTERFERED), reason_of(res, "L2"))
+    reason_is("late", res, {
+        "L1": (qa_run.REASON_INTERFERED, "({})".format(qa_run.INTERFERE_REQUEST), None),
+        "L2": (qa_run.REASON_INTERFERED, "({})".format(qa_run.INTERFERE_DIALOG), None),
+        "X1": (qa_run.REASON_REQUEST_BLOCKED, "/api/goods/search", None)})
 
 
 @scenario
@@ -315,6 +444,12 @@ def sc_popup():
     ran = expect_status("popup: 다른 창 · 앞 케이스 요청 차단", res, {
         "PP1": "PASS", "PP2": "PASS", "PP3": "PASS", "K1": "PASS", "K2": "PASS", "K3": "BLOCKED"})
     check("popup: 서버 쓰기는 승인 케이스의 저장 2회뿐", ran and w == ["POST saved", "POST saved"], str(w))
+    reason_is("popup", res, {"K3": (qa_run.REASON_FIRST_GOTO, None, gates.BLOCK_FIRST_GOTO)})
+    # A-13: 팝업을 연 케이스에 '새 창 열림' 신호, 팝업을 안 연 케이스에는 없음
+    sig = {c: res.get(c, {}).get("signals") or [] for c in ("PP1", "PP2")}
+    check("popup: PP1 에 '새 창 열림' 신호 · PP2 에는 없음",
+          qa_run.SIGNAL_POPUP in sig["PP1"] and qa_run.SIGNAL_POPUP not in sig["PP2"], str(sig))
+    check("popup: 리포트에 '새 창 열림' 신호", qa_run.SIGNAL_POPUP in text(f, "리포트.html"))
 
 
 @scenario
@@ -322,6 +457,7 @@ def sc_race():
     code, f, meta, res, out, w = run("race", "--no-retry")
     ran = expect_status("race: 바뀐 글자로 판정 · 내장 blocklist '발송'", res, {"R1": "BLOCKED"})
     no_writes("race: 서버 쓰기 0", ran, w)
+    reason_is("race", res, {"R1": (qa_run.REASON_RUNTIME_BLOCKLIST, "'text*=발송'", gates.BLOCK_BLOCKLIST)})
     code, f, meta, res, out, w = run("race_off", "--no-retry")
     ran = expect_status("race: blocklist_off 로 풀면 실행", res, {"R2": "PASS"})
     check("race: 풀었을 때 서버 쓰기 1회", ran and w == ["POST send"], str(w))
@@ -336,8 +472,9 @@ def sc_absence():
                   {"R3c": "PASS", "R3d": "ERROR", "R3e": "FAIL", "R3f": "ERROR", "R3g": "ERROR"})
     check("absence: anchor 없는 not_contains 요소 없음은 부재 판정 불가",
           has_reason(res, "R3d", qa_run.REASON_ABSENCE_UNKNOWN), reason_of(res, "R3d"))
-    check("absence: 관찰 중 anchor 사라짐 사유", "기준 요소(anchor)가 사라짐" in reason_of(res, "R3f"),
-          reason_of(res, "R3f"))
+    check("absence: 관찰 중 anchor 사라짐 사유", has_reason(res, "R3f", qa_run.REASON_ANCHOR_GONE)
+          and "#vanish" in reason_of(res, "R3f"), reason_of(res, "R3f"))
+    check("absence: 요소가 떨어지면 시간 초과 사유", has_reason(res, "R3g", qa_run.REASON_TIMEOUT), reason_of(res, "R3g"))
     d = res.get("R3g", {}).get("duration", 99)
     check("absence: 요소가 떨어져도 5초 안에 끝남", d < 5, "{}초 / {}".format(d, reason_of(res, "R3g")))
 
@@ -361,6 +498,7 @@ def sc_dlg():
 def sc_allerr():
     code, f, meta, res, out, w = run("allerr", "--dry-run", "--no-retry")
     ran = expect_status("allerr: 전부 점검 필요", res, {"Z1": "ERROR", "Z2": "ERROR", "Z3": "ERROR"})
+    reason_is("allerr", res, {c: (qa_run.REASON_NOT_FOUND, "#nope" + c[1], None) for c in ("Z1", "Z2", "Z3")})
     log, md, rep = text(f, "웍스등록.txt"), text(f, "개발전달.md"), text(f, "리포트.html")
     first2 = log.splitlines()[:2]
     check("allerr: 웍스 첫 두 줄 '판정한 0건 중' · '판정하지 못한 3건'",
@@ -439,7 +577,8 @@ def sc_blres():
     code, f, meta, res, out, w = run("blres", "--dry-run", "--no-retry")
     ran = expect_status("blres: blocklist 'send' 는 스크립트에 안 걸림 · 'del' GET 링크는 막힘", res,
                         {"BL1": "PASS", "BL2": "ERROR"})
-    check("blres: BL2 사유에 blocklist 'del'", "blocklist 'del'" in reason_of(res, "BL2"), reason_of(res, "BL2"))
+    check("blres: BL2 사유에 blocklist 'del'", "blocklist 'del'" in reason_of(res, "BL2")
+          and has_reason(res, "BL2", qa_run.REASON_REQUEST_BLOCKED), reason_of(res, "BL2"))
     check("blres: del 링크 GET 서버 0", ran and not any("del_item" in x for x in w), str(w))
 
 
@@ -499,9 +638,14 @@ def sc_trace():
 
 @scenario
 def sc_gate():
+    want = {"TC-101": (qa_run.REASON_UNDECLARED, "'click #save'", gates.BLOCK_UNDECLARED),
+            "TC-102": (qa_run.REASON_UNDECLARED, "'check #use-y'", gates.BLOCK_UNDECLARED)}
     code, f, meta, res, out, w = run("gate", "--dry-run")
     g1 = statuses(res)
+    reason_is("gate 모드 1", res, want)
     code, f, meta, res, out, w = run("gate")
+    expect_status("gate: 전체 실행 차단", res, {"TC-101": "BLOCKED", "TC-102": "BLOCKED"})
+    reason_is("gate 전체", res, want)
     check("gate: 모드 1 · 전체 실행 판정 일치 (둘 다 차단)",
           g1 == statuses(res) == {"TC-101": "BLOCKED", "TC-102": "BLOCKED"},
           "{} / {}".format(g1, statuses(res)))
@@ -516,6 +660,9 @@ def sc_sess():
           and meta.get("aborted") is True)
     rep, log, md = text(f, "리포트.html"), text(f, "웍스등록.txt"), text(f, "개발전달.md")
     check("sess: '1번째 케이스' 중단 표시", "1번째 케이스" in rep)
+    expect_status("sess: 첫 케이스는 세션 만료로 점검 필요", res, {"TC-201": "ERROR"})
+    check("sess: 중단 뒤 둘째 케이스는 안 돎", "TC-202" not in res, str(sorted(res)))
+    reason_is("sess", res, {"TC-201": (qa_run.REASON_SESSION, "_smoke.html", None)})
     check("sess: 웍스 · md · 개발 탭이 '전달 보류 (2건 중 1건 실행)'",
           all("검수 중단 · 전달 보류 (2건 중 1건 실행)" in x for x in (log, md, rep)), log[:120])
     check("sess: 중단된 실행은 복사 버튼 없음", 'id="copybtn"' not in rep)
@@ -530,8 +677,9 @@ def sc_sessblk():
     """앞 케이스에서 막은 로그인 유지 POST → 다음 케이스 로그인 화면 → 중단 사유 · 알림 · 콘솔에 그 경로 (R3-14)."""
     code, f, meta, res, out, w = run("sessblk", "--no-retry")
     path = "POST /api/auth/refresh"
-    check("sessblk: 종료 코드 3 · SB1 은 막은 요청으로 점검 필요", code == 3 and statuses(res) == {
-        "SB1": "ERROR", "SB2": "ERROR"}, "{} / {}".format(code, statuses(res)))
+    check("sessblk: 종료 코드 3", code == 3, str(code))
+    expect_status("sessblk: SB1 은 막은 요청으로 점검 필요 · SB2 는 세션 만료", res, {"SB1": "ERROR", "SB2": "ERROR"})
+    reason_is("sessblk", res, {"SB1": (qa_run.REASON_REQUEST_BLOCKED, path, None)})
     rs = reason_of(res, "SB2")
     check("sessblk: 중단 사유에 직전에 막은 요청 경로 · 다시 로그인해도 같은 결과",
           has_reason(res, "SB2", qa_run.REASON_SESSION) and path in rs
@@ -570,12 +718,15 @@ def sc_probe():
     code, f, meta, res, out, w = run("probe", "--dry-run")
     expect_status("probe: 선언 없는 쓰기 · 오타 부재 판정 · 화면 글자", res,
                   {"P-1": "BLOCKED", "P-2": "ERROR", "P-3": "PASS"})
+    reason_is("probe", res, {"P-1": (qa_run.REASON_UNDECLARED, "'click #save'", gates.BLOCK_UNDECLARED),
+                             "P-2": (qa_run.REASON_ABSENCE_UNKNOWN, "#chatt", None)})
     code, f, meta, res, out, w = run("probe_kind")
     check("probe_kind: 분류값 오타는 실행 전 멈춤", code == 1 and "kind 'improvement'" in out
           and not res, out[-200:])
     code, f, meta, res, out, w = run("probe2")
     expect_status("probe2: 늦은 렌더 · 숨은 문구 · 늦은 알럿 · 세션 만료", res,
                   {"Q-1": "FAIL", "Q-1b": "FAIL", "Q-2": "PASS", "Q-3": "PASS", "Q-5": "ERROR"})
+    reason_is("probe2", res, {"Q-5": (qa_run.REASON_SESSION, "login.html", None)})
     q5 = res.get("Q-5", {})
     check("probe2: 세션 만료 케이스도 cleanup 실행", any(s["phase"] == "cleanup" and s["status"] == "OK"
                                                     for s in q5.get("steps", [])))
@@ -600,7 +751,13 @@ def sc_flaky():
 @scenario
 def sc_trend():
     run("trend")
-    run("trend", "--case", "P2")
+    code, f, meta, res, out, w = run("trend", "--case", "P2")
+    # A-13: --case 부분 실행은 md 머리줄 · 웍스 둘째 줄에 '일부 케이스만 실행'
+    part = "일부 케이스만 실행 (전체 2건 중 1건)"
+    md, log = text(f, "개발전달.md"), text(f, "웍스등록.txt")
+    check("trend: --case 부분 실행 md 머리줄 · 웍스 둘째 줄에 '{}'".format(part),
+          set(res) == {"P2"} and meta.get("partial") is True and "\n- {}\n".format(part) in md
+          and log.splitlines()[1:2] == [part], "{} / {}".format(md[:300], log[:200]))
     code, f, meta, res, out, w = run("trend")
     check("trend: 부분 실행 뒤 전체 실행에서 P1 '계속 실패'", res.get("P1", {}).get("trend") == "still",
           str(res.get("P1", {}).get("trend")))
@@ -647,6 +804,9 @@ def sc_smoke():
         "TC-001": "PASS", "TC-002": "FAIL", "TC-003": "SKIPPED", "TC-004": "PASS", "TC-005": "BLOCKED",
         "TC-006": "BLOCKED", "TC-007": "PASS", "TC-008": "ERROR", "TC-009": "NA", "TC-010": "FAIL",
         "TC-011": "PASS", "TC-012": "FAIL", "TC-013": "PASS", "QA-잔여": "PASS"})
+    reason_is("smoke", res, {"TC-005": (qa_run.REASON_BLOCKLIST, "'text*=발송'", gates.BLOCK_BLOCKLIST),
+                             "TC-006": (qa_run.REASON_NO_CLEANUP, None, gates.BLOCK_NO_CLEANUP),
+                             "TC-008": (qa_run.REASON_NOT_FOUND, "#nope", None)})
     check("smoke: 플러그인 폴더에 산출물 없음", not (QA / "output").exists() and not (QA.parent / "output").exists())
 
 
@@ -699,9 +859,79 @@ def sc_bat():
           "{} / {}".format(p.returncode, msg.strip()[:200]))
 
 
+@scenario
+def sc_unclean():
+    """정리 스텝만 실패 (A-13): 개발 전달이 아니라 점검 필요, 할 일 '운영 데이터 미정리', 카드 · 콘솔에 입력값."""
+    code, f, meta, res, out, w = run("unclean", "--no-retry")
+    ran = expect_status("unclean: 본 테스트 통과 · 정리 실패는 점검 필요", res, {"UC1": "ERROR"})
+    reason_is("unclean", res, {"UC1": (qa_run.REASON_CLEANUP_FAIL, None, None)})
+    check("unclean: 정리 실패 이유는 삭제 버튼 시간 초과", has_reason(res, "UC1", qa_run.REASON_TIMEOUT),
+          reason_of(res, "UC1"))
+    r = res.get("UC1", {})
+    check("unclean: unclean 기록 · 입력값 보존", r.get("unclean") is True
+          and r.get("unclean_inputs") == [make_specs.QA_NAME], str((r.get("unclean"), r.get("unclean_inputs"))))
+    rep = text(f, "리포트.html")
+    check("unclean: 할 일 '운영 데이터 미정리 1건' · 카드에 입력값",
+          '<a class="todo" href="#case-UC1">운영 데이터 미정리 1건</a>' in rep
+          and html.escape("'{}'".format(make_specs.QA_NAME)) in rep.split('id="case-UC1"', 1)[-1],
+          re.sub(r"\s+", " ", rep.split('class="todoline"', 1)[-1][:300]))
+    check("unclean: 콘솔에 정리되지 않은 쓰기 케이스", "[!] 정리되지 않은 쓰기 케이스: UC1" in out, out[-300:])
+    check("unclean: 개발 전달 0건", ran and meta.get("n_dev") == 0, str(meta.get("n_dev")))
+    check("unclean: 서버 쓰기는 저장 1회", ran and w == ["POST b5save"], str(w))
+
+
+@scenario
+def sc_crash():
+    """브라우저 강제 종료 (A-13, repro 5): 부분 리포트 · aborted(why=error) · 종료 코드 3 · 전달 보류."""
+    WORK["killed"] = 0
+    code, f, meta, res, out, w = run("crash", "--no-retry")
+    check("crash: 러너가 띄운 브라우저만 강제 종료 (1개 이상)", WORK["killed"] > 0, str(WORK["killed"]))
+    check("crash: 종료 코드 3", code == 3, "{} / {}".format(code, out[-300:]))
+    expect_status("crash: 종료 전 케이스 결과는 남음", res, {"CR1": "PASS"})
+    info = meta.get("aborted_info") or {}
+    check("crash: results.json 에 aborted · why=error · 멈춘 케이스",
+          meta.get("aborted") is True and info.get("why") == "error" and info.get("case") in ("CR2", "CR3")
+          and info.get("total") == 3 and bool(info.get("msg")), str(info))
+    rep, log, md = text(f, "리포트.html"), text(f, "웍스등록.txt"), text(f, "개발전달.md")
+    check("crash: 부분 리포트 · 중단 알림 · 할 일 '다시 실행 필요'",
+          '<div class="alert" id="abort">' in rep and '<a class="todo" href="#abort">다시 실행 필요</a>' in rep, rep[:200])
+    check("crash: 웍스 · md 가 '검수 중단 · 전달 보류 (3건 중'",
+          all("검수 중단 · 전달 보류 (3건 중" in x for x in (log, md)), log[:120])
+    check("crash: 개발 전달 0건 · CR3 은 통과로 안 나옴", meta.get("n_dev") == 0
+          and res.get("CR3", {}).get("status") != "PASS", str(statuses(res)))
+
+
+@scenario
+def sc_broken():
+    """앞 실행의 results.json 이 깨져도 다음 실행 정상 (A-13, repro 4)."""
+    code, f, meta, res, out, w = run("broken")
+    first = f
+    if f is not None and (f / "results.json").exists():
+        (f / "results.json").write_text("{깨짐", encoding="utf-8")
+    code, f, meta, res, out, w = run("broken")
+    check("broken: 깨진 결과 뒤 실행 종료 코드 0 · 새 결과 폴더", code == 0 and f is not None and f != first,
+          "{} / {}".format(code, out[-300:]))
+    expect_status("broken: 깨진 결과 뒤 다음 실행 통과", res, {"OK1": "PASS"})
+    check("broken: 리포트 · 웍스 생성", (f is not None and (f / "리포트.html").exists())
+          and "미반영 오류 0건" in text(f, "웍스등록.txt"))
+    check("broken: 깨진 앞 실행 폴더는 지우지 않음", first is not None and first.exists())
+
+
+@scenario
+def sc_wsock():
+    """웹소켓 연결은 막지 못하므로 판정 무관 신호로 남긴다 (A-13)."""
+    code, f, meta, res, out, w = run("wsock", "--no-retry")
+    expect_status("wsock: 웹소켓을 열어도 판정은 통과", res, {"WS1": "PASS"})
+    sig = " ".join(res.get("WS1", {}).get("signals") or [])
+    parts = [p for p in re.split(r"\{[^}]*\}", qa_run.SIGNAL_WEBSOCKET) if p.strip()]
+    check("wsock: 신호에 웹소켓 연결 · 주소", all(p in sig for p in parts) and "/ws" in sig, sig)
+    check("wsock: 리포트에 웹소켓 신호", parts[0] in text(f, "리포트.html"))
+
+
 ORDER = ["dry", "live", "block", "approved", "allowpost", "confirm", "getw", "late", "lateok", "popup",
          "race", "absence", "dlg", "allerr", "popsel", "boundary", "bypass", "wfalse", "ignore", "blres", "explore",
-         "trace", "gate", "sess", "sessblk", "retrypop", "probe", "flaky", "trend", "shared", "smoke", "bat"]
+         "trace", "gate", "sess", "sessblk", "retrypop", "probe", "flaky", "trend", "shared", "unclean", "crash",
+         "broken", "wsock", "smoke", "bat"]
 
 
 def main():
@@ -731,7 +961,12 @@ def main():
     try:
         for n in names:
             print("  ... {}".format(n), flush=True)
+            CUR["sc"] = n
             SCENARIOS[n]()
+        # ERROR · BLOCKED 기대값은 상태만 보지 않는다. 사유 상수 · blocked_by 코드 검사가 빠진 것을 실패로 (R3-37)
+        bare = sorted(WANT_BAD - REASON_SEEN)
+        check("회귀: ERROR · BLOCKED 기대값 {}개 모두 사유 검사".format(len(WANT_BAD)), not bare,
+              "사유 검사 없음: {}".format(bare))
     finally:
         srv.shutdown()
         srv.server_close()

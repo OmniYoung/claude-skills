@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>묶음 5</title></head>
+<body>
+<h1 id="title">묶음 5</h1>
+<div id="marker">none</div>
+<!-- 운영 데이터 미정리: 입력 · 저장은 되는데 정리할 삭제 버튼이 화면에 없다 -->
+<input id="name"><button id="save">저장</button>
+<script>
+function mark(t) { document.getElementById('marker').textContent = t; }
+document.getElementById('save').onclick = function () {
+  fetch('/api/write?what=b5save', {method: 'POST'}).then(function (r) { if (r.ok) mark('saved'); });
+};
+// ?ws=1: 열리자마자 웹소켓 연결 (안전망 밖이라 신호만 남는다)
+if (location.search.indexOf('ws=1') >= 0) {
+  var ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen = function () { mark('ws-open'); };
+}
+</script>
+</body></html>
