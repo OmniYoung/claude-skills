@@ -142,7 +142,7 @@ def static_block_hit(step, blocklist):
 
 
 def runtime_block_hit(texts, blocklist):
-    """클릭 직전 요소의 화면 글자(innerText · value · aria-label · title)가 blocklist 에 걸리는지.
+    """클릭 직전 요소의 화면 글자(innerText · value · aria-label · title · alt)가 blocklist 에 걸리는지.
 
     글자 패턴이 아닌 것(URL 일부 등)도 화면 글자와 완전히 같으면 막는다.
     """
