@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>POST 조회 화면</title></head>
+<body>
+<h1 id="title">주문 조회</h1>
+<button id="search">조회</button>
+<div id="out">-</div>
+<script>
+// 레거시 어드민처럼 조회를 POST 로 보낸다
+document.getElementById('search').onclick = function () {
+  fetch('/api/search', {method: 'POST', body: 'q=1'}).then(function (r) { return r.json(); })
+    .then(function (j) { document.getElementById('out').textContent = '결과 ' + j.n + '건'; })
+    .catch(function () { document.getElementById('out').textContent = '실패'; });
+};
+</script>
+</body></html>

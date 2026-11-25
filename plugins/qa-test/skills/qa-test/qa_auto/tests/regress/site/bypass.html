@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>우회 경로 점검</title></head>
+<body>
+<h1 id="title">우회 점검</h1>
+<div id="marker">none</div>
+<div id="out">-</div>
+<!-- GET 쓰기: 글자 없는 아이콘 링크 · blocklist 주소에만 걸리는 링크 · 이미지 비컨 -->
+<a id="toggle" href="/api/getwrite?what=toggle"><span style="display:inline-block;width:24px;height:14px;background:#ccc"></span></a>
+<a id="out-link" href="/api/getwrite?what=withdraw">회원 탈퇴</a>
+<a id="legacy-ok" href="#" onclick="new Image().src='/api/wget?what=cancel'; return false;">확인</a>
+<!-- allow_post: 조회는 POST /api/goods/search, 모달 확인은 PUT, 아이콘 휴지통은 DELETE -->
+<button id="search">조회</button>
+<div id="modal"><button id="modal-ok">확인</button></div>
+<button id="trash"><svg width="12" height="12"><rect width="12" height="12"/></svg></button>
+<!-- allow_post 부분일치 함정: 쓰기 주소의 쿼리에 허용 경로 -->
+<button id="ap">조회3</button>
+<!-- 늦게 나가는 POST · 늦게 뜨는 확인창 -->
+<button id="late">검색</button>
+<button id="lateconfirm">보기2</button>
+<!-- 다른 사이트(localhost)로 가는 조회 POST -->
+<button id="xsearch">조회2</button>
+<div id="xout">-</div>
+<!-- 준비 중 -> 발송 으로 바뀌는 버튼 -->
+<button id="act" disabled>준비 중</button>
+<!-- 승인 쓰기: 확인창이 늦게 뜨는 삭제 -->
+<button id="del">삭제</button>
+<button id="save">저장</button>
+<!-- 뒤늦은 쓰기 · 팝업 -->
+<button id="bg">상세</button>
+<a id="pop" href="/pop.html" target="_blank">미리보기</a>
+<!-- 늦게 그려지는 금지 문구 · 늦게 빠지는 행 -->
+<div id="notice"></div>
+<table id="tbl"><thead><tr><th>상품</th></tr></thead>
+<tbody><tr class="row soldout"><td>A</td></tr><tr class="row"><td>B</td></tr></tbody></table>
+<button id="filter">품절 제외</button>
+<script>
+function mark(t) { document.getElementById('marker').textContent = t; }
+function post(what) {
+  return fetch('/api/write?what=' + what, {method: 'POST'})
+    .then(function (r) { if (r.ok) mark(what); })
+    .catch(function () { mark('blocked'); });
+}
+document.getElementById('search').onclick = function () {
+  fetch('/api/goods/search', {method: 'POST', body: 'q=1'}).then(function (r) { return r.json(); })
+    .then(function (j) { document.getElementById('out').textContent = '결과 ' + j.n + '건'; });
+};
+document.getElementById('modal-ok').onclick = function () {
+  fetch('/api/write?what=put', {method: 'PUT', body: 'price=0'}).then(function () { mark('put'); }).catch(function () {});
+};
+document.getElementById('trash').onclick = function () {
+  fetch('/api/write?what=delete', {method: 'DELETE'}).then(function () { mark('deleted'); }).catch(function () {});
+};
+document.getElementById('ap').onclick = function () {
+  fetch('/api/write?what=allowpost&ret=/api/search', {method: 'POST'})
+    .then(function () { document.getElementById('out').textContent = '결과 3건'; }).catch(function () {});
+};
+document.getElementById('late').onclick = function () {
+  setTimeout(function () {
+    fetch('/api/search2', {method: 'POST', body: 'q=1'}).then(function (r) { return r.json(); })
+      .then(function (j) { document.getElementById('out').textContent = '결과 ' + j.n + '건'; })
+      .catch(function () {});
+  }, 900);
+};
+document.getElementById('lateconfirm').onclick = function () {
+  setTimeout(function () { if (confirm('진행할까요?')) document.getElementById('out').textContent = '진행됨'; }, 900);
+};
+document.getElementById('xsearch').onclick = function () {
+  fetch('http://localhost:' + location.port + '/api/goods/search', {method: 'POST', body: 'q=1'})
+    .then(function (r) { return r.json(); })
+    .then(function (j) { document.getElementById('xout').textContent = '결과 ' + j.n + '건'; })
+    .catch(function () { document.getElementById('xout').textContent = '조회 실패'; });
+};
+setTimeout(function () {
+  var b = document.getElementById('act');
+  b.textContent = '발송'; b.disabled = false;
+  b.onclick = function () { post('send'); };
+}, 1500);
+document.getElementById('del').onclick = function () {
+  setTimeout(function () { if (confirm('삭제하시겠습니까?')) post('deleted'); }, 900);
+};
+document.getElementById('save').onclick = function () { post('saved'); };
+document.getElementById('bg').onclick = function () { setTimeout(function () { post('late-bg'); }, 1200); };
+setTimeout(function () { document.getElementById('notice').textContent = '이 상품은 반품 불가 상품입니다'; }, 1500);
+document.getElementById('filter').onclick = function () {
+  setTimeout(function () {
+    document.querySelectorAll('tr.soldout').forEach(function (e) { e.remove(); });
+  }, 1000);
+};
+</script>
+</body></html>

@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>간헐 화면</title></head>
+<body>
+<h1 id="t">-</h1>
+<script>
+// 같은 탭에서 처음 열면 "준비중", 다시 열면 "완료". 1차 실패 · 재실행 통과를 흉내낸다
+var n = +(sessionStorage.getItem('n') || 0); sessionStorage.setItem('n', n + 1);
+document.getElementById('t').textContent = n % 2 === 0 ? '준비중' : '완료';
+</script>
+</body></html>

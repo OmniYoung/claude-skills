@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>쓰기 안전장치 점검</title></head>
+<body>
+<h1 id="title">리뷰 페이지</h1>
+<div id="marker">none</div>
+<div id="ls">writes=?</div>
+<button id="approve">승인</button>
+<button id="save">저장</button>
+<button id="del">선택 항목 처리</button>
+<button id="alertbtn">알림</button>
+<button id="lazy">조회</button>
+<div id="result" style="display:none">결과</div>
+<form id="f" method="post" action="/api/write?what=form"><input name="q"></form>
+<script>
+// 쓰기 버튼은 실제 서버에 POST 를 보낸다. 서버가 받은 횟수가 곧 운영 데이터 쓰기 횟수다.
+function write(what) {
+  return fetch('/api/write?what=' + what, {method: 'POST'})
+    .then(function (r) { if (r.ok) document.getElementById('marker').textContent = what; })
+    .catch(function () { document.getElementById('marker').textContent = 'blocked'; });
+}
+document.getElementById('approve').onclick = function () { write('approved'); };
+document.getElementById('save').onclick = function () { write('saved'); };
+document.getElementById('del').onclick = function () { if (confirm('삭제하시겠습니까?')) write('deleted'); };
+document.getElementById('alertbtn').onclick = function () { alert('완료되었습니다'); };
+document.getElementById('lazy').onclick = function () {
+  setTimeout(function () { document.getElementById('result').style.display = 'block'; }, 1500);
+};
+fetch('/api/count').then(function (r) { return r.json(); })
+  .then(function (j) { document.getElementById('ls').textContent = 'writes=' + j.n; });
+if (location.search.indexOf('withdraw') >= 0) write('withdrawn');
+</script>
+</body></html>

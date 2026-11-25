@@ -19,7 +19,7 @@
     ]
   },
   "blocklist": [
-    "text=발송",
+    "text*=발송",
     "text=결제"
   ],
   "cases": [
@@ -255,6 +255,7 @@
       "title": "전제 데이터 없음 (NA 경로 검증)",
       "requirement": "precondition 불충족 -> 조건 미충족",
       "source": "스모크",
+      "anchor": "table.list",
       "writes": false,
       "approved": false,
       "steps": [

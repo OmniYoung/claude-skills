@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body>
+<h1 id="t">상품</h1>
+<div id="notice">배송 안내<span style="display:none">반품 불가</span></div>
+<table id="grid"></table>
+<button id="save">저장</button>
+<button id="go">이동</button>
+<script>
+setTimeout(function () { document.getElementById('grid').innerHTML = '<tr><td class="col-owner">담당자</td></tr>'; }, 1500);
+document.getElementById('save').onclick = function () { setTimeout(function () { alert('저장되었습니다'); }, 900); };
+document.getElementById('go').onclick = function () { location.href = 'login.html'; };
+</script></body></html>

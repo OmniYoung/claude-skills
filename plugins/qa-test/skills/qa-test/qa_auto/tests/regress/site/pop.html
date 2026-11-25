@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>팝업</title></head>
+<body><h1>미리보기</h1>
+<script>
+// 레거시 팝업: 열려 있는 동안 주기적으로 POST (임시저장 · 열람 기록 등)
+setInterval(function () { fetch('/api/write?what=popup', {method: 'POST'}).catch(function () {}); }, 700);
+</script>
+</body></html>

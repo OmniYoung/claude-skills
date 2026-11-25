@@ -4,13 +4,14 @@ QA 자동화 러너 - spec.json을 읽어 실제 사이트에서 테스트를 �
 사용법:
   py <skill>/qa_auto/qa_run.py --init .            작업 폴더(qa_auto/) 생성
   py <skill>/qa_auto/qa_run.py qa_auto/specs/xxx.json
-  py <skill>/qa_auto/qa_run.py ... --dry-run       쓰기 스텝 전부 건너뜀 (셀렉터 검증용)
+  py <skill>/qa_auto/qa_run.py ... --dry-run       쓰기 케이스 전부 건너뜀 (셀렉터 검증용)
   py <skill>/qa_auto/qa_run.py ... --headed        브라우저 띄워서 눈으로 확인
   py <skill>/qa_auto/qa_run.py ... --case TC-003,TC-007   특정 케이스만 (쉼표로 여러 개)
   py <skill>/qa_auto/qa_run.py ... --rerun-failed latest   지난 실행에서 실패·점검 필요였던 케이스만
   py <skill>/qa_auto/qa_run.py ... --compare <결과폴더>     비교 기준 실행 지정 (기본: 직전 실행)
   py <skill>/qa_auto/qa_run.py ... --no-retry      실패 케이스 1회 재실행 끄기
   py <skill>/qa_auto/qa_run.py ... --no-trace      실패 케이스 동작 기록(trace) 끄기
+  py <skill>/qa_auto/qa_run.py --strip-trace <trace.zip>  쿠키 · 인증 헤더 지운 사본 (개발팀 요청 시)
   py <skill>/qa_auto/qa_run.py --login URL [URL2 ...] --ws qa_auto
                                                    로그인 창. 로그인하면 저장 후 저절로 닫힘
 
@@ -20,9 +21,15 @@ QA 자동화 러너 - spec.json을 읽어 실제 사이트에서 테스트를 �
   덕분에 팀원 각자가 자기 프로젝트에서 같은 스킬을 공유해 쓸 수 있다.
 
 안전장치:
-  - 쓰기 스텝은 케이스에 approved:true 가 있어야만 실행된다 (없으면 SKIP)
-  - blocklist 매칭 시 승인 여부와 무관하게 케이스 중단
+  - 쓰기 스텝이 있으면 케이스에 writes:true · approved:true 가 있어야 실행된다
+    (선언 누락은 BLOCKED, 미승인 · dry-run 은 SKIPPED)
+  - 누르기 직전 버튼 글자로 한 번 더 판정한다 (blocklist · 쓰기 힌트). 읽은 요소 그대로 누른다
+  - 승인된 쓰기 케이스 밖에서는 서버로 가는 쓰기 요청(POST · PUT · DELETE 등)을 아예 막는다.
+    승인 케이스도 첫 goto 이후, 지금 페이지에서 나간 요청만 통과시킨다
+  - blocklist 의 주소 패턴은 메서드 · 승인과 무관하게 네트워크 단에서 막는다
+  - 확인창은 승인된 쓰기 스텝에서만 수락하고, 나머지는 취소한다
   - 쓰기 케이스는 cleanup 스텝이 없으면 실행 거부
+  - 막지 못하는 것: blocklist 에 없는 GET 쓰기 · 웹소켓 (리포트에 의심 신호로 남긴다)
 """
 
 import argparse
@@ -68,28 +75,29 @@ def find_fixture(workspace, name):
             name, workspace / "fixtures", SKILL_DIR / "fixtures"))
 
 # -- 쓰기 판정 --------------------------------------------------
-WRITE_ACTIONS = {"fill", "type", "select", "check", "uncheck", "upload"}
-WRITE_HINTS = ["저장", "확인", "등록", "추가", "삭제", "수정", "전송", "발송", "적용", "완료"]
-READ_ACTIONS = {
-    "goto", "wait", "screenshot", "hover",
-    "expect_visible", "expect_hidden", "expect_text",
-    "expect_count", "expect_attr", "expect_dialog", "expect_no_dialog",
-    "expect_js", "download", "expect_file", "expect_box",
-}
+# 판정 규칙은 gates.py 에 모아두고 단위 테스트한다 (tests/test_gates.py).
+from gates import (ALL_ACTIONS, SAFE_METHODS, is_write_step, static_block_hit,
+                   runtime_block_hit, runtime_write_hint, site_of, post_allowed,
+                   text_mismatch, count_mismatch, is_absence_check, norm,
+                   spec_errors, spec_warnings, effective_blocklist, url_block_hit,
+                   ignored_request, get_write_suspect)
 
-# expect_js 는 읽기 전용이어야 한다. 아래 패턴이 보이면 실행을 거부해
-# 임의 JS로 쓰기 승인 게이트를 우회하는 길을 막는다.
+# 스펙이 요구하는 러너 기능 수준. 스펙 meta.runner_min 이 이보다 크면 실행 전에 멈춘다.
+# 새 키 · 새 action 을 넣을 때만 올린다. run_qa.bat 도 이 줄을 읽어 낮으면 멈춘다
+# (형식을 바꾸지 말 것: "RUNNER_VERSION = 숫자").
+RUNNER_VERSION = 5
+
+# 종료 코드. bat 이 3 일 때만 로그인 안내를 띄운다 (argparse 오류가 2 를 쓴다)
+EXIT_ABORT = 3
+
+# expect_js 는 읽기 전용이어야 한다. 아래 패턴이 보이면 실행을 거부한다.
+# 단어 목록은 우회가 쉬워서 1차 거름망일 뿐이고, 실제 보호는 네트워크 안전망이 한다.
 JS_MUTATION_PATTERNS = [
     ".click(", ".submit(", ".focus(", "fetch(", "XMLHttpRequest", "navigator.send",
     ".value=", ".value =", ".innerHTML=", ".innerHTML =", ".remove(", ".setAttribute(",
     "localStorage", "sessionStorage", "document.cookie", "location=", "location.href",
     "dispatchEvent", "eval(",
 ]
-ALL_ACTIONS = WRITE_ACTIONS | READ_ACTIONS | {"click", "dblclick", "press"}
-
-# press 로 누르는 키 중 상태를 바꾸지 않는 것들. 나머지(Enter 등)는 쓰기로 본다.
-READ_KEYS = {"escape", "tab", "arrowup", "arrowdown", "arrowleft", "arrowright",
-             "pageup", "pagedown", "home", "end", "shift+tab"}
 
 DEFAULT_VIEWPORT = {"width": 1600, "height": 900}
 
@@ -99,57 +107,46 @@ SESSION_KEYS = ("auth", "cookies", "user_agent", "login_check", "viewport")
 # 실행일 기준 날짜. "{TODAY}", "{TODAY+30}", "{TODAY-1}" -> YYYY-MM-DD.
 # 날짜 입력 · 달력 화면은 고정 날짜를 쓰면 시간이 지나 과거가 되거나 "오늘" 칸을 못 집는다.
 DATE_TOKEN = re.compile(r"\{TODAY(?:([+-])(\d+))?\}")
-TOKEN_FIELDS = ("selector", "value", "text", "url", "js", "contains", "not_contains")
+TOKEN_FIELDS = ("selector", "value", "text", "url", "js", "contains", "not_contains",
+                "equals", "matches", "anchor")
 
-# 실패로 보는 상태. 재실행 · 지난 실행 비교 · 종료 코드가 이 묶음을 쓴다.
+# 실패로 보는 상태. 종료 코드 · 지난 실행 비교가 이 묶음을 쓴다.
 BAD = ("FAIL", "ERROR")
+# 재검수(--rerun-failed)로 다시 돌릴 상태. 불안정도 다시 본다.
+RERUN = ("FAIL", "ERROR", "FLAKY")
+
+# 이 조작 뒤에만 알럿 기록을 비운다. 판정 · 대기 스텝에서 비우면 직전 조작의 알럿을 놓친다.
+CLEARS_DIALOGS = {"goto", "click", "dblclick", "press", "fill", "type", "select",
+                  "check", "uncheck", "upload", "hover", "download"}
 
 
-def expand_tokens(step, qa_prefix=""):
-    """{TODAY±N} 은 실행일, {QA_PREFIX} 는 meta.qa_prefix 로 바꾼다.
-
-    {QA_PREFIX} 는 잔여 데이터 점검처럼 테스트 데이터를 검색할 때 쓴다.
-    """
+def _expand_str(s, qa_prefix, run_id):
     def rep(m):
         d = date.today()
         if m.group(1):
             d += timedelta(days=int(m.group(2)) * (1 if m.group(1) == "+" else -1))
         return d.isoformat()
+    if "{QA_PREFIX}" in s:
+        s = s.replace("{QA_PREFIX}", qa_prefix)
+    if "{RUN_ID}" in s:
+        s = s.replace("{RUN_ID}", run_id)
+    if "{TODAY" in s:
+        s = DATE_TOKEN.sub(rep, s)
+    return s
+
+
+def expand_tokens(step, qa_prefix="", run_id=""):
+    """{TODAY±N} 은 실행일, {QA_PREFIX} 는 meta.qa_prefix, {RUN_ID} 는 실행 번호로 바꾼다.
+
+    {RUN_ID} 는 실행마다 달라서, 지난 실행이 남긴 데이터와 이번 데이터를 섞지 않고 찾을 수 있다.
+    qa_prefix 안에 든 {TODAY} · {RUN_ID} 도 펼친다.
+    """
+    prefix = _expand_str(qa_prefix or "", "", run_id)
     out = dict(step)
     for k in TOKEN_FIELDS:
         if isinstance(out.get(k), str):
-            if "{TODAY" in out[k]:
-                out[k] = DATE_TOKEN.sub(rep, out[k])
-            if "{QA_PREFIX}" in out[k]:
-                out[k] = out[k].replace("{QA_PREFIX}", qa_prefix)
+            out[k] = _expand_str(out[k], prefix, run_id)
     return out
-
-
-def is_write_step(step):
-    """스텝이 서버에 쓰기를 하는지 판정. spec_schema.md의 '쓰기 판정 규칙' 구현."""
-    action = step.get("action")
-    if "write" in step:                      # 규칙 3,4 - 명시값이 최우선
-        return bool(step["write"])
-    if action in WRITE_ACTIONS:              # 규칙 1
-        return True
-    if action in ("click", "dblclick"):       # 규칙 2 - 텍스트 힌트로 자동 승격
-        target = "{} {}".format(step.get("selector", ""), step.get("label", ""))
-        return any(hint in target for hint in WRITE_HINTS)
-    if action == "press":                     # Enter 는 저장, Esc·Tab 등은 이동일 뿐
-        return step.get("key", "").lower() not in READ_KEYS
-    return False
-
-
-def hits_blocklist(step, blocklist):
-    """blocklist 패턴에 걸리는 스텝인지. 걸리면 승인 여부 무관하게 차단."""
-    target = "{} {} {}".format(
-        step.get("selector", ""), step.get("label", ""), step.get("value", "")
-    )
-    for pattern in blocklist:
-        needle = pattern.split("=", 1)[1] if pattern.startswith("text=") else pattern
-        if needle and needle in target:
-            return pattern
-    return None
 
 
 # -- 쿠키 ------------------------------------------------------
@@ -283,6 +280,18 @@ class PreconditionUnmet(Exception):
     pass
 
 
+class WriteBlocked(Exception):
+    """실행 직전에 쓰기 동작으로 판정됐는데 승인된 쓰기 케이스가 아님. 케이스는 BLOCKED."""
+    pass
+
+
+class SessionAbort(Exception):
+    """세션 만료로 전체 실행을 멈춘다. 중단 시점 케이스의 결과를 같이 싣는다."""
+    def __init__(self, msg, result):
+        super().__init__(msg)
+        self.result = result
+
+
 def _reason(e):
     """예외를 사유 한 줄로. 시간 초과는 왜 점검이 필요한지 같이 적는다."""
     msg = str(e).split("\n")[0][:300]
@@ -319,23 +328,129 @@ def _edge(b, name):
 
 
 class Runner:
-    def __init__(self, page, spec, spec_path, shot_dir, workspace):
+    def __init__(self, page, spec, spec_path, shot_dir, workspace, run_id=""):
         self.page = page
         self.spec = spec
         self.spec_path = spec_path
         self.shot_dir = shot_dir
         self.workspace = workspace
+        self.run_id = run_id
+        meta = spec["meta"]
         # {QA_ROOT} = 번들된 스크립트 폴더의 file:// URI. 자체 점검용 로컬 픽스처를 가리킬 때 쓴다.
-        self.base_url = spec["meta"]["base_url"].replace(
-            "{QA_ROOT}", SKILL_DIR.as_uri()).rstrip("/")
-        self.qa_prefix = spec["meta"].get("qa_prefix", "")
-        self.login_check = spec["meta"].get("login_check")
-        self.dialogs = []          # 직전 액션이 띄운 알럿 버퍼
+        self.base_url = meta["base_url"].replace("{QA_ROOT}", SKILL_DIR.as_uri()).rstrip("/")
+        self.base_site = site_of(self.base_url)
+        self.qa_prefix = _expand_str(meta.get("qa_prefix", ""), "", run_id)
+        self.login_check = meta.get("login_check")
+        self.spec_blocklist = spec.get("blocklist", [])
+        self.blocklist = list(self.spec_blocklist)   # 케이스마다 effective_blocklist 로 바꾼다
+        self.allow_post = meta.get("allow_post", [])
+        self.ignore_requests = meta.get("ignore_requests", [])
+        self.dialogs = []          # 직전 조작이 띄운 알럿 기록
+        self.dismissed = []        # 승인 없이 떠서 취소한 확인창
         self.warnings = []
         self.shots = []
         self.files = {}   # download 로 받은 파일
         self.signals = []  # 케이스 하나 동안 난 JS 오류 · 콘솔 오류 · 실패한 요청 (참고용)
-        self.attach(page)
+        self.get_suspects = []     # 클릭 직후 나간 GET 쓰기 의심 주소 (막지 못함, 확인 필요)
+        # 네트워크 안전망 상태. 승인된 쓰기 케이스의 첫 goto 뒤부터 cleanup 까지만 allow_writes 가 켜진다
+        self.allow_writes = False
+        self.js_guard = False      # expect_js 평가 중에는 승인 케이스여도 서버 쓰기를 막는다
+        self.step_write = False    # 확인창을 수락할 수 있는 구간인지 (쓰기 스텝부터 다음 조작 전까지)
+        self.in_click = False      # 클릭 · 키 입력 직후 구간. GET 쓰기 의심 신호를 이때만 모은다
+        self.blocked = []          # 막은 요청 (판정에 영향). 스텝 판정 때 비운다
+        self.blocked_log = []      # 이 케이스에서 막은 요청 전부 (사유에 싣는다)
+        self.interfered = set()    # 이 케이스에서 막은 것 ("요청 차단" · "확인창 취소")
+        self.anchor = None         # 케이스 기본 anchor
+        self.fail_url = ""         # 실패 시점 주소
+        if page is not None:
+            self.attach(page)
+
+    def guard_context(self, ctx):
+        """컨텍스트의 모든 요청을 거쳐 가게 한다.
+
+        버튼 글자나 셀렉터로 쓰기를 가려내는 규칙은 언제든 빠져나갈 길이 있다. 서버에
+        무언가 보내는 요청(POST · PUT · DELETE 등)을 승인된 쓰기 케이스 밖에서는 아예
+        보내지 않는 것이 마지막 안전장치다.
+        """
+        ctx.route("**/*", self._route)
+
+    def _from_current_page(self, request):
+        """요청이 지금 케이스의 페이지에서 나왔는지. 알 수 없으면(서비스워커 등) None."""
+        try:
+            pg = request.frame.page
+        except Exception:
+            return None
+        return pg is self.page
+
+    def _route(self, route, request):
+        try:
+            method = request.method.upper()
+            url = request.url
+            if url.startswith(("data:", "blob:", "file:")):
+                return route.continue_()
+            # 기획자가 적어 둔 주소 패턴은 메서드 · 승인과 무관하게 막는다 (GET 쓰기 대비)
+            hit = url_block_hit(url, self.blocklist)
+            if hit:
+                return self._block(route, method, url, "blocklist '{}'".format(hit))
+            own = self._from_current_page(request)
+            if own is False:
+                # 팝업 · 앞 케이스가 연 창 · 다른 세션 탭의 요청은 지금 케이스 것이 아니다
+                route.abort("blockedbyclient")
+                self._signal("다른 창의 요청 차단: {} {}".format(method, url[:120]))
+                return
+            if method in SAFE_METHODS:
+                if self.in_click and not self.allow_writes and site_of(url) == self.base_site:
+                    word = get_write_suspect(url)
+                    if word and request.resource_type in ("document", "xhr", "fetch", "image",
+                                                          "ping", "other"):
+                        line = "GET {} ('{}')".format(url[:160], word)
+                        if line not in self.get_suspects and len(self.get_suspects) < 10:
+                            self.get_suspects.append(line)
+                return route.continue_()
+            if self.allow_writes and not self.js_guard and own:
+                return route.continue_()
+            if not self.js_guard and post_allowed(method, url, self.allow_post):
+                return route.continue_()
+            self._block(route, method, url, "")
+        except Exception:
+            # 안전망 쪽 오류는 막는 쪽으로 처리하고, 조용히 통과로 끝나지 않게 기록한다
+            try:
+                route.abort("blockedbyclient")
+            except Exception:
+                pass
+            try:
+                self.blocked.append("안전망 처리 오류로 막음: {} {}".format(request.method, request.url[:120]))
+                self.interfered.add("요청 차단")
+            except Exception:
+                pass
+
+    def _block(self, route, method, url, why):
+        """요청을 막고 기록한다. 분석 · 로그 요청(ignore)은 막기만 하고 판정에는 쓰지 않는다."""
+        route.abort("blockedbyclient")
+        line = "{} {}{}".format(method, url[:160], " ({})".format(why) if why else "")
+        if ignored_request(url, self.ignore_requests):
+            self._signal("분석 · 로그 요청 차단 (판정 무관): {}".format(line))
+            return
+        if line not in self.blocked:
+            self.blocked.append(line)
+        if line not in self.blocked_log:
+            self.blocked_log.append(line)
+        self.interfered.add("요청 차단")
+
+    def check_blocked(self):
+        """막은 요청이 있으면 스텝을 점검 필요로 끝낸다."""
+        if self.blocked:
+            lines, self.blocked = self.blocked, []
+            raise StepFailure(
+                "서버 요청을 막음: {} - 쓰기 승인된 케이스가 아님. 조회용 POST 면 meta.allow_post, "
+                "로그성 요청이면 meta.ignore_requests 에 경로를 적는다".format(" / ".join(lines[:3])))
+
+    def check_dismissed(self):
+        if self.dismissed:
+            msgs, self.dismissed = self.dismissed, []
+            raise StepFailure(
+                "확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 문구만 확인하려면 "
+                "다음 스텝에 expect_dialog 를 둔다".format(" | ".join(msgs)[:150]))
 
     def attach(self, page):
         """페이지에 알럿 처리와 콘솔 · 네트워크 오류 수집을 붙인다.
@@ -348,6 +463,16 @@ class Runner:
             "JS 오류: {}".format(str(e).split("\n")[0][:200])))
         page.on("console", self._on_console)
         page.on("response", self._on_response)
+        # 웹소켓으로 보내는 데이터는 안전망이 막지 못한다. 연결이 있었다는 것만 남긴다
+        page.on("websocket", lambda ws: self._signal(
+            "웹소켓 연결 (안전망 밖 - 이 연결로 보내는 쓰기는 막지 못함): {}".format(ws.url[:120])))
+
+    opening = False    # 러너가 직접 새 페이지를 여는 중 (진단용)
+
+    def on_new_page(self, pg):
+        """새 창(팝업)이 열리면 신호만 남긴다. 그 창의 요청은 _route 가 막는다."""
+        if not self.opening and pg is not self.page:
+            self._signal("새 창이 열림 - 그 창의 요청은 막음 (팝업 화면은 검수 대상 아님)")
 
     def _signal(self, s):
         if s not in self.signals and len(self.signals) < 20:
@@ -380,8 +505,36 @@ class Runner:
         self.login_check = login_check
 
     def _on_dialog(self, dialog):
+        """알럿은 닫고, 확인창(confirm · prompt)은 승인된 쓰기 스텝에서만 수락한다.
+
+        삭제 버튼 → "삭제하시겠습니까?" 를 자동 수락하면 dry-run 이어도 지워진다.
+        승인 없이 뜬 확인창은 취소하고 기록해 둔다 (check_dismissed).
+        """
+        try:
+            src = dialog.page
+        except Exception:
+            src = None
+        if src is not None and src is not self.page:
+            # 다른 세션 탭 · 팝업에서 뜬 창은 지금 케이스의 알럿이 아니다
+            self._signal("다른 창의 알럿 · 확인창 취소: {}".format(dialog.message[:80]))
+            try:
+                dialog.dismiss()
+            except Exception:
+                pass
+            return
         self.dialogs.append(dialog.message)
-        dialog.accept()
+        try:
+            if dialog.type in ("confirm", "prompt"):
+                if self.allow_writes and self.step_write and not self.js_guard:
+                    dialog.accept()
+                else:
+                    self.dismissed.append(dialog.message)
+                    self.interfered.add("확인창 취소")
+                    dialog.dismiss()
+            else:
+                dialog.accept()
+        except Exception:
+            pass
 
     def _check_session(self):
         """로그인이 풀렸는지 본다.
@@ -448,14 +601,22 @@ class Runner:
             return None
         target = self.page.locator(sel).first
         try:
-            target.scroll_into_view_if_needed(timeout=5000)
+            target.scroll_into_view_if_needed(timeout=3000)
             self.page.wait_for_timeout(120)
             b = target.bounding_box()
         except Exception:
+            b = None
+        boxes = [b] if b else []
+        # 기준 요소(위치 판정의 기준 · anchor)도 같이 담는다. 대상이 없으면 기준 요소 주변만이라도
+        for ex in step.get("extra") or []:
+            try:
+                eb = self.page.locator(ex).first.bounding_box(timeout=1000)
+                if eb:
+                    boxes.append(eb)
+            except Exception:
+                pass
+        if not boxes:
             return None
-        if not b:
-            return None
-        boxes = [b]
 
         # 위아래 정상 행을 같이 담아야 "이 행만 다르다"가 보인다
         ctx = step.get("context")
@@ -497,6 +658,42 @@ class Runner:
         vw = self.page.viewport_size or {"width": 1600, "height": 900}
         return {"x": max(0, x0), "y": max(0, y0),
                 "width": min(x1 - x0, vw["width"]), "height": y1 - y0}
+
+    def _shoot_failure(self, cid, step):
+        """실패 증빙. 실패한 스텝의 요소 주변만 잘라 원본 그대로 찍는다.
+
+        1600px 화면 전체를 썸네일로 줄이면 글자를 읽을 수 없다. 요소가 없으면 화면 전체.
+        크기 · 위치 판정(expect_box)만 표시 없이는 읽을 수 없어 테두리 표시본을 한 장 더 남긴다.
+        """
+        try:
+            self.fail_url = self.page.url
+        except Exception:
+            self.fail_url = ""
+        st = None
+        refs = []
+        if step and step.get("selector"):
+            st = expand_tokens(step, self.spec["meta"].get("qa_prefix", ""), self.run_id)
+            refs = [st.get(k) for k in ("below", "above", "left_of", "right_of", "inside", "align_to")
+                    if st.get(k)]
+            anchor = self._anchor_of(st)
+            st = {"selector": st["selector"], "padding": step.get("padding", 60),
+                  "extra": refs + ([anchor] if anchor else [])}
+        self._shoot("{}_FAIL".format(cid), st)
+        if step and step.get("action") == "expect_box":
+            sels = [st["selector"]] + refs
+            js = """(sels) => sels.forEach((s, i) => { const e = document.querySelector(s);
+                if (e) { e.dataset.qaOutline = e.style.outline || '';
+                e.style.outline = (i ? '2px dashed #6b7280' : '2px solid #c0362c'); } })"""
+            undo = """(sels) => sels.forEach((s) => { const e = document.querySelector(s);
+                if (e && 'qaOutline' in e.dataset) { e.style.outline = e.dataset.qaOutline;
+                delete e.dataset.qaOutline; } })"""
+            try:
+                self.page.evaluate(js, sels)
+                # 표시본도 대상과 기준 요소를 합친 영역만. 화면 전체는 대부분 흰 여백이다
+                self._shoot("{}_FAIL_표시".format(cid), {"selector": st["selector"], "padding": 40,
+                                                       "extra": refs})
+            finally:
+                self.page.evaluate(undo, sels)
 
     def _box(self, sel, timeout):
         loc = self.page.locator(sel).first
@@ -565,16 +762,135 @@ class Runner:
         if errs:
             raise AssertFail("크기·위치 불일치 - {}: {}".format(sel, " / ".join(errs)))
 
+    # -- 기다림 · 기준 요소 ------------------------------------
+
+    def _until(self, check, timeout):
+        """check() 가 None 을 돌려줄 때까지 기다린다. 끝내 안 되면 마지막 사유를 돌려준다.
+
+        화면이 늦게 그려지는 경우("0건" 뒤에 "12건")에 바로 판정하면 거짓 실패가 난다.
+        """
+        end = time.time() + timeout / 1000.0
+        while True:
+            err = check()
+            if err is None or time.time() >= end:
+                return err
+            self.page.wait_for_timeout(150)
+
+    def _hold(self, violation, step):
+        """'없어야 함' 판정. 없어질 때까지 기다린 뒤(settle) 관찰 구간(hold) 내내 없어야 통과.
+
+        한 번 보고 통과시키면 늦게 그려지는 문구를 놓치고, 목록을 다시 그리는 순간 잠깐 0개가
+        된 것을 통과로 본다. 처음 본 것으로 바로 실패시키면 필터 적용 뒤 늦게 빠지는 행이
+        거짓 실패가 된다. 관찰이 끝나면 기준 요소(anchor)가 아직 있는지 다시 본다.
+        """
+        err = self._until(violation, step.get("settle", 5000))
+        if err:
+            return err
+        end = time.time() + step.get("hold", 1500) / 1000.0
+        while time.time() < end:
+            self.page.wait_for_timeout(150)
+            err = violation()
+            if err:
+                return err
+        anchor = self._anchor_of(step)
+        if anchor:
+            try:
+                still = self.page.locator(anchor).first.is_visible()
+            except Exception:
+                still = False
+            if not still:
+                raise StepFailure("관찰 중에 기준 요소(anchor)가 사라짐: {} - 화면이 바뀌어 판정 불가".format(anchor))
+        return None
+
+    def _anchor_of(self, step):
+        return step.get("anchor") or self.anchor
+
+    def _anchor_visible(self, step, timeout):
+        """anchor 가 보일 때까지 기다린다. 없으면 False."""
+        anchor = self._anchor_of(step)
+        if not anchor:
+            return False
+        try:
+            self.page.locator(anchor).first.wait_for(state="visible", timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    def _require_anchor(self, step, timeout):
+        """'없어야 함' 판정 전에 그 영역이 다 그려졌는지 anchor 로 확인한다.
+
+        anchor 가 있는데 안 보이면 화면이 덜 그려졌거나 셀렉터가 낡은 것이라 판정하지 않는다.
+        """
+        anchor = self._anchor_of(step)
+        if anchor and not self._anchor_visible(step, timeout):
+            raise StepFailure("기준 요소(anchor)가 안 보임: {} - 화면이 덜 그려졌거나 셀렉터가 바뀌었을 수 있음".format(anchor))
+        return bool(anchor)
+
+    def _missing(self, sel, step, what):
+        """요소가 0개일 때. anchor 가 보이면 '페이지는 정상인데 이 요소만 없다' 이므로 FAIL."""
+        anchor = self._anchor_of(step)
+        if anchor and self._anchor_visible(step, 1000):
+            raise AssertFail("{} 없음: {} (기준 요소 {} 는 보임)".format(what, sel, anchor))
+        raise StepFailure("요소를 찾지 못함: {} - 셀렉터가 바뀌었거나 화면이 덜 그려졌을 수 있음".format(sel))
+
+    # -- 쓰기 판정 (실행 직전) ---------------------------------
+
+    def _guard_click(self, step, sel, timeout):
+        """누르기 직전에 화면에 그려진 글자로 blocklist · 쓰기 여부를 다시 보고, 그 요소를 돌려준다.
+
+        스펙의 셀렉터가 #approve 처럼 글자를 안 담고 있으면 스펙만으로는 쓰기 버튼인지 모른다.
+        누를 수 있게 될 때까지 기다린 뒤(trial) 글자를 읽고, 읽은 요소 그대로 누른다.
+        셀렉터로 다시 찾아 누르면 "준비 중" 이던 버튼이 그 사이 "발송" 으로 바뀌어도 눌린다.
+        """
+        loc = self.page.locator(sel).first
+        loc.click(trial=True, timeout=timeout)
+        h = loc.element_handle(timeout=timeout)
+        try:
+            texts = h.evaluate("""e => [e.innerText || '', e.value || '',
+                e.getAttribute('aria-label') || '', e.getAttribute('title') || '']""")
+        except Exception:
+            texts = []
+        hit = runtime_block_hit(texts, self.blocklist)
+        if hit:
+            raise WriteBlocked("blocklist 패턴 '{}' 와 같은 버튼 - 실행 거부".format(hit))
+        if "write" in step:
+            return h
+        hint = runtime_write_hint(texts)
+        if hint:
+            self.step_write = True
+        if hint and not self.allow_writes:
+            shown = norm(" ".join(t for t in texts if t))[:40]
+            raise WriteBlocked(
+                "버튼 글자 '{}' 에 '{}' 이 있어 쓰기 동작으로 판정 - writes·approved 선언 필요. "
+                "조회 버튼이면 스텝에 write:false".format(shown, hint))
+        return h
+
+    def _after_nav(self, before):
+        """조작으로 주소가 바뀌었으면 로그인이 풀렸는지 본다."""
+        try:
+            if self.page.url != before:
+                self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                self._check_session()
+        except SessionExpired:
+            raise
+        except Exception:
+            pass
+
     def run(self, step, case_id, idx):
-        step = expand_tokens(step, self.qa_prefix)
+        step = expand_tokens(step, self.spec["meta"].get("qa_prefix", ""), self.run_id)
         action = step.get("action")
         if action not in ALL_ACTIONS:
             raise StepFailure("정의되지 않은 action: {}".format(action))
 
         sel = step.get("selector")
-        # expect_dialog 는 직전 버퍼를 봐야 하므로 여기서 비우면 안 된다
-        if action not in ("expect_dialog", "expect_no_dialog"):
+        timeout = step.get("timeout", 10000)
+        # 확인창 취소 기록은 바로 다음 expect_dialog 만 쓸 수 있다
+        if action != "expect_dialog":
+            self.check_dismissed()
+        self.check_blocked()
+        if action in CLEARS_DIALOGS:
             self.dialogs = []
+        before = self.page.url
 
         if action == "goto":
             self.page.goto(self._url(step["url"]), wait_until="domcontentloaded")
@@ -583,25 +899,44 @@ class Runner:
 
         elif action == "wait":
             if sel:
-                self.page.wait_for_selector(sel, timeout=step.get("timeout", 10000))
+                self.page.wait_for_selector(sel, timeout=timeout)
             else:
                 self.page.wait_for_timeout(step.get("ms", 1000))
 
         elif action == "download":
             # 엑셀 내보내기는 관리자 화면 단골 요건인데 "자동화 불가"로 빠지기 쉽다.
             # 받아서 파싱하면 행수·컬럼·순서까지 화면과 대조된다.
+            h = self._guard_click(step, sel, step.get("click_timeout", 10000))
             dl_dir = self.shot_dir.parent / "downloads"
             dl_dir.mkdir(parents=True, exist_ok=True)
-            with self.page.expect_download(timeout=step.get("timeout", 120000)) as info:
-                self.page.click(sel, timeout=step.get("click_timeout", 10000))
-            dl = info.value
+            # expect_download 로 기다리면 내보내기 요청이 막혔을 때도 120초를 다 기다린다.
+            # 받은 파일과 막힌 요청을 같이 보면서 기다린다
+            got = []
+
+            def on_dl(d):
+                got.append(d)
+            self.page.on("download", on_dl)
+            try:
+                self.in_click = True
+                h.click(timeout=step.get("click_timeout", 10000))
+                end = time.time() + step.get("timeout", 120000) / 1000.0
+                while not got:
+                    if self.blocked:
+                        self.check_blocked()
+                    if time.time() >= end:
+                        raise StepFailure("파일이 내려오지 않음 - 시간 초과 ({}초)".format(
+                            step.get("timeout", 120000) // 1000))
+                    self.page.wait_for_timeout(500)
+            finally:
+                self.in_click = False
+                self.page.remove_listener("download", on_dl)
+            dl = got[0]
             name = step.get("save_as") or dl.suggested_filename or "download"
             if "." not in name:
                 name += pathlib.PurePath(dl.suggested_filename or "x.bin").suffix
             target = dl_dir / re.sub(r'[\\/:*?"<>|]', "_", name)
             dl.save_as(str(target))
             self.files[step.get("save_as") or name] = target
-            return None
 
         elif action == "expect_file":
             key = step["file"]
@@ -623,32 +958,48 @@ class Runner:
                 raise AssertFail("행 수 미달 - 기대:{}행 이상 / 실제:{}행".format(step["min_rows"], body))
             if "row_count_js" in step:
                 # 운영 데이터는 계속 바뀌므로 기대값을 화면에서 읽어 비교한다
-                expected = self.page.evaluate(step["row_count_js"])
+                expected = self._eval_readonly(step["row_count_js"])
                 if body != expected:
                     raise AssertFail(
                         "행 수 불일치 - 화면 {}행 / 파일 {}행".format(expected, body))
-            return None
+            # 운영 데이터 원본(거래처 · 재고)이 기획 폴더에 남지 않게 판정이 끝나면 지운다.
+            # 실패하면 위에서 예외로 빠지므로 증빙으로 남는다.
+            try:
+                path.unlink()
+                self.files.pop(key, None)
+            except Exception:
+                pass
 
         elif action == "screenshot":
             return self._shoot("{}_{:02d}_{}".format(case_id, idx, step.get("name", "shot")), step)
 
-        elif action == "click":
-            self.page.click(sel, timeout=step.get("timeout", 10000))
-            self.page.wait_for_timeout(500)
-
-        elif action == "dblclick":
-            # 인라인 편집은 보통 더블클릭으로 input 이 생긴다. fill 은 그 input 을
-            # 먼저 찾아야 해서 진입 자체가 안 되므로 별도 액션이 필요하다.
-            self.page.dblclick(sel, timeout=step.get("timeout", 10000))
-            self.page.wait_for_timeout(400)
+        elif action in ("click", "dblclick"):
+            h = self._guard_click(step, sel, timeout)
+            self.in_click = True
+            try:
+                if action == "click":
+                    h.click(timeout=timeout)
+                    self.page.wait_for_timeout(500)
+                else:
+                    # 인라인 편집은 보통 더블클릭으로 input 이 생긴다
+                    h.dblclick(timeout=timeout)
+                    self.page.wait_for_timeout(400)
+                self._after_nav(before)
+            finally:
+                self.in_click = False
 
         elif action == "press":
             key = step["key"]
-            if sel:
-                self.page.press(sel, key, timeout=step.get("timeout", 10000))
-            else:
-                self.page.keyboard.press(key)
-            self.page.wait_for_timeout(400)
+            self.in_click = True
+            try:
+                if sel:
+                    self.page.press(sel, key, timeout=timeout)
+                else:
+                    self.page.keyboard.press(key)
+                self.page.wait_for_timeout(400)
+                self._after_nav(before)
+            finally:
+                self.in_click = False
 
         elif action == "type":
             # fill 과 달리 기존 값을 지우지 않고 키 입력을 흉내낸다.
@@ -665,7 +1016,7 @@ class Runner:
             loc = self.page.locator(sel).first
             # scroll_into_view_if_needed 는 "보이기만 하면" 멈춘다. 요소가 뷰포트
             # 하단에 걸쳐 있으면 아래로 열리는 툴팁이 렌더 영역 밖이라 거짓 실패가 난다.
-            loc.scroll_into_view_if_needed(timeout=step.get("timeout", 10000))
+            loc.scroll_into_view_if_needed(timeout=timeout)
             loc.evaluate("e => e.scrollIntoView({block:'center', inline:'center'})")
             self.page.wait_for_timeout(150)
             box = loc.bounding_box()
@@ -676,87 +1027,169 @@ class Runner:
 
         elif action == "fill":
             value = step.get("value", "")
-            self._warn_prefix(value, case_id, idx)
-            self.page.fill(sel, value)
+            if is_write_step(step):
+                self._warn_prefix(value, case_id, idx)
+            self.page.fill(sel, value, timeout=timeout)
 
         elif action == "select":
-            self.page.select_option(sel, step["value"])
+            self.page.select_option(sel, step["value"], timeout=timeout)
 
         elif action == "check":
-            self.page.check(sel)
+            self.page.check(sel, timeout=timeout)
 
         elif action == "uncheck":
-            self.page.uncheck(sel)
+            self.page.uncheck(sel, timeout=timeout)
 
         elif action == "upload":
             try:
                 f = find_fixture(self.workspace, step["file"])
             except FileNotFoundError as e:
                 raise StepFailure(str(e))
-            self.page.set_input_files(sel, str(f))
+            self.page.set_input_files(sel, str(f), timeout=timeout)
             self.page.wait_for_timeout(800)
 
         elif action == "expect_visible":
-            if not self.page.is_visible(sel):
-                raise AssertFail("보여야 할 요소가 안 보임: {}".format(sel))
+            loc = self.page.locator(sel)
+            try:
+                loc.first.wait_for(state="visible", timeout=step.get("timeout", 7000))
+            except PWTimeout:
+                if loc.count() == 0:
+                    self._missing(sel, step, "보여야 할 요소가")
+                raise AssertFail("보여야 할 요소가 숨겨져 있음: {}".format(sel))
 
         elif action == "expect_hidden":
-            if self.page.is_visible(sel):
-                raise AssertFail("숨겨져야 할 요소가 보임: {}".format(sel))
+            has_anchor = self._require_anchor(step, step.get("timeout", 7000))
+            loc = self.page.locator(sel)
+
+            def shown():
+                try:
+                    if loc.count() and loc.first.is_visible():
+                        return "숨겨져야 할 요소가 보임: {}".format(sel)
+                except Exception:
+                    pass
+                return None
+            err = self._hold(shown, step)
+            if err:
+                raise AssertFail(err)
+            if loc.count() == 0 and not has_anchor:
+                raise StepFailure(
+                    "부재 판정 불가 - {} 가 0개인데 anchor 가 없어 셀렉터가 맞는지 알 수 없음".format(sel))
 
         elif action == "expect_text":
-            actual = (self.page.text_content(sel, timeout=step.get("timeout", 10000)) or "").strip()
-            if "contains" in step and step["contains"] not in actual:
-                raise AssertFail("문구 불일치 - 기대:'{}' / 실제:'{}'".format(
-                    step["contains"], actual[:120]))
-            if "not_contains" in step and step["not_contains"] in actual:
-                raise AssertFail("있으면 안 되는 문구가 있음 - '{}' / 실제:'{}'".format(
-                    step["not_contains"], actual[:150]))
+            loc = self.page.locator(sel)
+            try:
+                loc.first.wait_for(state="attached", timeout=timeout)
+            except PWTimeout:
+                self._missing(sel, step, "문구 요소가")
+            if "not_contains" in step:
+                self._require_anchor(step, timeout)
+
+            def texts():
+                return loc.all_inner_texts() if step.get("all") else [loc.first.inner_text()]
+
+            def check():
+                for i, t in enumerate(texts()):
+                    err = text_mismatch(t, step)
+                    if err:
+                        return ("{}번째 행: ".format(i + 1) if step.get("all") else "") + err
+                return None
+            # 있어야 하는 문구는 그려질 때까지 기다린다. 없어야 하는 문구는 관찰 구간 내내 없어야 한다
+            positive = any(k in step for k in ("contains", "equals", "matches"))
+            if positive:
+                err = self._until(check, step.get("settle", 5000))
+                if err:
+                    raise AssertFail(err)
+            if "not_contains" in step:
+                err = self._hold(check, step)
+                if err:
+                    raise AssertFail(err)
 
         elif action == "expect_count":
-            n = self.page.locator(sel).count()
-            if "count" in step and n != step["count"]:
-                raise AssertFail("개수 불일치 - 기대:{} / 실제:{}".format(step["count"], n))
-            if "min" in step and n < step["min"]:
-                raise AssertFail("최소 개수 미달 - 기대:{}개 이상 / 실제:{}".format(step["min"], n))
+            loc = self.page.locator(sel)
+            if is_absence_check(step):
+                has_anchor = self._require_anchor(step, timeout)
+                err = self._hold(lambda: count_mismatch(loc.count(), step), step)
+                if err:
+                    raise AssertFail(err)
+                if loc.count() == 0 and not has_anchor:
+                    raise StepFailure(
+                        "부재 판정 불가 - {} 가 0개인데 anchor 가 없어 셀렉터가 맞는지 알 수 없음".format(sel))
+            else:
+                err = self._until(lambda: count_mismatch(loc.count(), step), step.get("settle", 5000))
+                if err:
+                    if loc.count() == 0:
+                        self._missing(sel, step, "개수를 셀 요소가")
+                    raise AssertFail(err)
 
         elif action == "expect_attr":
-            val = self.page.get_attribute(sel, step["attr"]) or ""
-            if "equals" in step and val != step["equals"]:
-                raise AssertFail("{} 불일치 - 기대:'{}' / 실제:'{}'".format(
-                    step["attr"], step["equals"], val))
-            if "contains" in step and step["contains"] not in val:
-                raise AssertFail("{}에 '{}' 없음 - 실제:'{}'".format(
-                    step["attr"], step["contains"], val))
+            loc = self.page.locator(sel)
+            try:
+                loc.first.wait_for(state="attached", timeout=timeout)
+            except PWTimeout:
+                self._missing(sel, step, "속성을 볼 요소가")
+
+            def check():
+                val = loc.first.get_attribute(step["attr"]) or ""
+                if "equals" in step and val != step["equals"]:
+                    return "{} 불일치 - 기대:'{}' / 실제:'{}'".format(step["attr"], step["equals"], val)
+                if "contains" in step and step["contains"] not in val:
+                    return "{}에 '{}' 없음 - 실제:'{}'".format(step["attr"], step["contains"], val)
+                return None
+            err = self._until(check, step.get("settle", 3000))
+            if err:
+                raise AssertFail(err)
 
         elif action == "expect_dialog":
-            if not self.dialogs:
-                raise AssertFail("알럿이 떠야 하는데 안 뜸 - 기대 문구:'{}'".format(step["contains"]))
-            joined = " | ".join(self.dialogs)
-            if step["contains"] not in joined:
-                raise AssertFail("알럿 문구 불일치 - 기대:'{}' / 실제:'{}'".format(
-                    step["contains"], joined))
+            # contains(부분일치) · equals(완전일치, 토씨까지) · matches(정규식). 알럿이 여럿이면 하나라도 맞으면 통과
+            want = {k: step[k] for k in ("contains", "equals", "matches") if k in step}
+            if not want:
+                raise StepFailure("expect_dialog 에 contains · equals · matches 중 하나가 필요하다")
+            desc = " · ".join("{} '{}'".format(k, v) for k, v in want.items())
+
+            def check():
+                if not self.dialogs:
+                    return "알럿이 떠야 하는데 안 뜸 - 기대 문구: {}".format(desc)
+                if any(text_mismatch(m, want) is None for m in self.dialogs):
+                    return None
+                return "알럿 문구 불일치 - 기대: {} / 실제:'{}'".format(desc, " | ".join(self.dialogs))
+            err = self._until(check, step.get("timeout", 5000))
+            # 확인창 문구를 본 것이므로 취소 기록은 의도한 것
+            self.dismissed = []
+            self.interfered.discard("확인창 취소")
+            if err:
+                raise AssertFail(err)
 
         elif action == "expect_no_dialog":
+            # 알럿은 조작 뒤 조금 늦게 뜰 수 있다. 바로 보면 "안 떴다" 로 거짓 통과한다
+            self.page.wait_for_timeout(step.get("ms", 2000))
             if self.dialogs:
                 raise AssertFail("알럿이 뜨면 안 되는데 뜸: {}".format(" | ".join(self.dialogs)))
 
         elif action == "expect_box":
             self._expect_box(step)
 
+        elif action == "expect_overflow":
+            loc = self.page.locator(sel)
+            try:
+                loc.first.wait_for(state="visible", timeout=timeout)
+            except PWTimeout:
+                self._missing(sel, step, "말줄임을 볼 요소가")
+            st = loc.first.evaluate("""e => ({over: e.scrollWidth > e.clientWidth + 1
+                || e.scrollHeight > e.clientHeight + 1,
+                ellipsis: getComputedStyle(e).textOverflow === 'ellipsis'
+                || parseInt(getComputedStyle(e).webkitLineClamp || '0') > 0})""")
+            if step.get("ellipsis", True):
+                if not (st["over"] and st["ellipsis"]):
+                    raise AssertFail("말줄임 안 됨: {} ({})".format(
+                        sel, "글자가 칸 안에 다 들어감" if not st["over"] else "넘친 글자가 잘리지 않음"))
+            elif st["over"]:
+                raise AssertFail("글자가 칸을 넘침: {}".format(sel))
+
         elif action == "expect_js":
             # CSS로 표현 안 되는 판정(노출 순서·계산값 비교)에만 쓴다. 읽기 전용 강제.
-            js = step["js"]
-            flat = js.replace(" ", "")
-            for bad in JS_MUTATION_PATTERNS:
-                if bad.replace(" ", "") in flat:
-                    raise StepFailure(
-                        "expect_js 는 읽기 전용만 허용 - 금지 패턴 '{}' 발견".format(bad))
-            value = self.page.evaluate(js)
+            value = self._eval_readonly(step["js"])
 
             # {ok, detail} 을 돌려주면 ok 로 판정하고 detail 을 사유에 그대로 싣는다.
-            # 기대값이 데이터에 따라 변해 equals 에 못 박는 경우(건수 비교 등)를 위한 것 —
-            # 불리언만 쓰면 "기대:True / 실제:False" 로 남아 개발팀에 그대로 못 보낸다.
             if isinstance(value, dict) and "ok" in value:
                 if not value["ok"]:
                     detail = value.get("detail", "")
@@ -770,21 +1203,80 @@ class Runner:
                 raise AssertFail("{} - 기대:{} / 실제:{}".format(
                     step.get("desc", "expect_js 불일치"), expected, value))
 
+        self.check_blocked()
         return None
+
+    def _eval_readonly(self, js):
+        """expect_js · row_count_js 평가. 금지 패턴을 먼저 거르고, 평가하는 동안은 서버 쓰기를 전부 막는다."""
+        flat = js.replace(" ", "")
+        for bad in JS_MUTATION_PATTERNS:
+            if bad.replace(" ", "") in flat:
+                raise StepFailure("expect_js 는 읽기 전용만 허용 - 금지 패턴 '{}' 발견".format(bad))
+        self.js_guard = True
+        try:
+            value = self.page.evaluate(js)
+            self.page.wait_for_timeout(200)   # 평가가 남긴 요청이 이 구간 안에 걸리게
+        finally:
+            self.js_guard = False
+        if self.blocked:
+            lines, self.blocked = self.blocked, []
+            raise StepFailure("expect_js 가 서버 요청을 보내려 해서 막음: {}".format(" / ".join(lines[:3])))
+        return value
 
 
 # -- 케이스 실행 ------------------------------------------------
 
-INTERACTION_ACTIONS = {"click", "fill", "select", "check", "uncheck", "upload", "hover"}
+INTERACTION_ACTIONS = {"click", "dblclick", "press", "fill", "type", "select", "check",
+                       "uncheck", "upload", "hover"}
 
 
-def diagnose_chain(runner, case, result):
+def case_write_steps(case):
+    """스펙만 보고 쓰기로 판정되는 스텝들 (본 스텝 + cleanup)."""
+    out = []
+    for phase, steps in (("test", case.get("steps", [])), ("cleanup", case.get("cleanup", []))):
+        for i, st in enumerate(steps, 1):
+            if is_write_step(st):
+                out.append((phase, i, st))
+    return out
+
+
+def case_writes(case):
+    """쓰기가 일어나는 케이스인지. 선언(writes)이 빠졌어도 쓰기 스텝이 있으면 쓰기 케이스다."""
+    return bool(case.get("writes")) or bool(case_write_steps(case))
+
+
+def step_label(step, qa_prefix=""):
+    """스텝 한 줄. 재현 절차에 그대로 쓰이므로 입력값 · 키도 담는다.
+
+    운영 데이터에 쓰는 값은 QA 프리픽스가 붙은 것만 보이고, 나머지는 글자 수만 적는다.
+    """
+    act = step.get("action")
+    tgt = step.get("selector", step.get("url", step.get("name", "")))
+    extra = ""
+    if act in ("fill", "type", "select"):
+        v = str(step.get("value", step.get("text", "")))
+        if (qa_prefix and qa_prefix in v) or not is_write_step(step):
+            extra = ' "{}"'.format(v if len(v) <= 40 else v[:30] + "…({}자)".format(len(v)))
+        else:
+            extra = " (값 {}자)".format(len(v))
+    elif act == "press":
+        extra = " [{}]".format(step.get("key", ""))
+    elif act == "upload":
+        extra = " ({})".format(step.get("file", ""))
+    return "{} {}{}".format(act, tgt, extra)
+
+
+def diagnose_chain(runner, case, result, dry_run):
     """chains 케이스가 실패했을 때, 이어서 해서 깨진 건지 원래 깨진 건지 가린다.
 
     실패한 스텝을 **직전 동작 하나만 앞세워** 새 페이지에서 다시 밟아본다.
     통과하면 앞선 동작들이 남긴 상태가 원인이고, 그대로 실패하면 기능 자체 문제다.
-    앞선 동작이 없으면(= 이미 최소 단위) 가릴 게 없으니 아무것도 하지 않는다.
+
+    쓰기를 다시 하게 되는 경우는 진단하지 않는다. dry-run · 건너뛴 스텝이 있는 실행도
+    애초에 기획대로 밟은 게 아니라 진단할 수 없다.
     """
+    if dry_run or any(s["status"] == "SKIP" for s in result["steps"]) or case_writes(case):
+        return None
     steps = case["steps"]
     failed = next((s["n"] for s in result["steps"]
                    if s["phase"] == "test" and s["status"] == "FAIL"), None)
@@ -797,16 +1289,41 @@ def diagnose_chain(runner, case, result):
                      if steps[i].get("action") in INTERACTION_ACTIONS), None)
     if first_goto is None or last_act is None:
         return None                                    # 되짚을 선행 동작이 없다
-
-    # 직전 동작 ~ 실패 스텝까지(사이의 wait 등 포함). 그 앞의 동작들은 일부러 뺀다.
     replay = [first_goto] + steps[last_act:idx + 1]
+    if any(is_write_step(s) for s in replay):
+        return None
+
+    old_page, old_dialogs = runner.page, runner.dialogs
+    old_interfered = set(runner.interfered)
+    runner.opening = True
+    try:
+        pg = old_page.context.new_page()
+    finally:
+        runner.opening = False
+    runner.attach(pg)
+    runner.page, runner.dialogs = pg, []
+    st = None
     try:
         for n, st in enumerate(replay, 1):
             runner.run(st, case["id"] + "_solo", n)
+        verdict = "단독 재현: 통과 → 이어서 조작할 때만 발생"
+    except SessionExpired:
+        raise
+    except AssertFail:
+        # 마지막 스텝의 판정이 단독으로도 어긋났을 때만 결론을 낸다
+        verdict = "단독 재현: 실패 → 연속 사용과 무관한 결함" if st is replay[-1] else None
     except Exception:
-        # 마지막 스텝에서 깨졌으면 단독으로도 실패, 앞에서 깨졌으면 판정 불가
-        return "단독 재현: 실패 → 연속 사용과 무관한 결함" if st is replay[-1] else None
-    return "단독 재현: 통과 → 이어서 조작할 때만 발생"
+        # 시간 초과 · 요청 차단 · 쓰기 차단은 화면 판정까지 못 간 것이라 결론을 내지 않는다
+        verdict = None
+    finally:
+        runner.page, runner.dialogs = old_page, old_dialogs
+        runner.blocked, runner.dismissed = [], []
+        runner.interfered = old_interfered
+        try:
+            pg.close()
+        except Exception:
+            pass
+    return verdict
 
 
 def run_case(runner, case, blocklist, dry_run):
@@ -822,7 +1339,7 @@ def run_case(runner, case, blocklist, dry_run):
         # 웍스 등록용 로그에 쓰는 값. area 는 묶음 제목, fix 는 오류 한 줄
         "area": case.get("area", ""),
         "fix": case.get("fix", ""),
-        "writes": case.get("writes", False),
+        "writes": case_writes(case),
         "approved": case.get("approved", False),
         # 치명 · 주요 · 경미. 개발 전달 목록에서 같은 영역 안의 순서를 정한다
         "severity": case.get("severity", ""),
@@ -836,8 +1353,27 @@ def run_case(runner, case, blocklist, dry_run):
         "duration": 0,
     }
     t0 = time.time()
+    approved_write = bool(case.get("writes") and case.get("approved") and not dry_run)
+    # 승인된 운영 쓰기 케이스에는 내장 blocklist(발송 · 결제 · 발주 · 일괄삭제)를 더한다
+    eff_block = effective_blocklist(blocklist, approved_write, runner.spec["meta"].get("blocklist_off"))
 
-    # -- 게이트 1: 쓰기 승인 --
+    # -- 게이트 1: blocklist (스펙 문자열) --
+    for step in case["steps"] + case.get("cleanup", []):
+        hit = static_block_hit(step, eff_block)
+        if hit:
+            result.update(status="BLOCKED",
+                          reason="blocklist 패턴 '{}' 매칭 - 실행 거부".format(hit))
+            return result
+
+    # -- 게이트 2: 쓰기 선언 · 승인 --
+    # 승인은 케이스 선언(writes)이 아니라 스텝 단위로 본다. 선언이 빠진 채 쓰기 스텝이 있으면
+    # 승인 절차를 거치지 않은 쓰기이므로 실행하지 않는다.
+    wsteps = case_write_steps(case)
+    if wsteps and not case.get("writes"):
+        phase, i, st = wsteps[0]
+        result.update(status="BLOCKED", reason="writes 선언 누락 - {}스텝 {} '{}' 이 쓰기 동작".format(
+            "정리 " if phase == "cleanup" else "", i, step_label(st)))
+        return result
     if case.get("writes"):
         if dry_run:
             result.update(status="SKIPPED", reason="dry-run 모드 - 쓰기 케이스 건너뜀")
@@ -848,60 +1384,77 @@ def run_case(runner, case, blocklist, dry_run):
         if not case.get("cleanup"):
             result.update(status="BLOCKED", reason="쓰기 케이스인데 cleanup 스텝이 없음 - 실행 거부")
             return result
-
-    # -- 게이트 2: blocklist --
-    for step in case["steps"] + case.get("cleanup", []):
-        hit = hits_blocklist(step, blocklist)
-        if hit:
-            result.update(status="BLOCKED",
-                          reason="blocklist 패턴 '{}' 매칭 - 실행 거부".format(hit))
+        # 앞 케이스가 남긴 타이머 · 화면의 요청이 쓰기 허용 구간에 섞이지 않게, 새로 접속한 뒤에만 연다
+        if (case["steps"] or [{}])[0].get("action") != "goto":
+            result.update(status="BLOCKED", reason="승인 쓰기 케이스는 첫 스텝이 goto 여야 함 - 실행 거부")
             return result
 
     shots_before = len(runner.shots)
-    runner.signals = []
+    runner.signals, runner.blocked, runner.dismissed = [], [], []
+    runner.get_suspects, runner.interfered, runner.fail_url = [], set(), ""
+    runner.blocked_log = []
+    runner.anchor = case.get("anchor")
+    runner.blocklist = eff_block
+    runner.allow_writes = False
+    runner.step_write = False
     soft_fails = []
+    state = {"failed_step": None, "opened": False}
+    qa_prefix = runner.qa_prefix
 
     def exec_steps(steps, phase):
         for i, step in enumerate(steps, 1):
-            label = "{} {}".format(
-                step.get("action"),
-                step.get("selector", step.get("url", step.get("name", "")))
-            )
+            label = step_label(step, qa_prefix)
             act = step.get("action")
             write = is_write_step(step)
             if step.get("precondition") and write:
                 raise StepFailure("precondition 스텝은 읽기만 가능: {}".format(label))
-            # 승인된 케이스여도 dry-run이면 쓰기 스텝은 건너뜀
-            if write and dry_run:
-                result["steps"].append({"phase": phase, "n": i, "label": label,
-                                        "action": act,
-                                        "status": "SKIP", "write": True, "msg": "dry-run"})
-                continue
+            # 확인창은 쓰기 스텝부터 다음 조작이 시작될 때까지 수락한다 (늦게 뜨는 확인창 대비)
+            if write or act in INTERACTION_ACTIONS or act == "goto":
+                runner.step_write = write
             try:
                 runner.run(step, cid, i)
                 result["steps"].append({"phase": phase, "n": i, "label": label,
                                         "action": act,
-                                        "status": "OK", "write": write, "msg": ""})
+                                        "status": "OK", "write": runner.step_write and (
+                                            write or act in INTERACTION_ACTIONS), "msg": ""})
+            except (SessionExpired, WriteBlocked):
+                raise
             except Exception as e:
                 msg = _reason(e)
                 result["steps"].append({"phase": phase, "n": i, "label": label,
                                         "action": act, "pre": bool(step.get("precondition")),
                                         "status": "FAIL", "write": write, "msg": msg})
                 if phase == "test" and step.get("precondition"):
-                    raise PreconditionUnmet(msg)
+                    # 조건이 안 맞는 건지, 화면이 안 그려졌거나 셀렉터가 낡은 건지 anchor 로 가른다
+                    if isinstance(e, AssertFail) and runner._anchor_visible(step, 2000):
+                        raise PreconditionUnmet(msg)
+                    raise StepFailure("조건 확인 불가 - {} (anchor 가 없거나 안 보임)".format(msg))
+                state["failed_step"] = step
                 # soft: 판정이 틀려도 멈추지 않고 다음 검증까지 본다. 끝나고 한꺼번에 실패 처리
                 if (phase == "test" and step.get("soft") and isinstance(e, AssertFail)
                         and act.startswith("expect_")):
                     soft_fails.append(msg)
                     continue
                 raise
+            # 승인 쓰기 케이스는 첫 goto 가 끝난 뒤부터 쓰기 요청을 통과시킨다
+            if approved_write and phase == "test" and act == "goto" and not state["opened"]:
+                state["opened"] = True
+                runner.allow_writes = True
+        # 마지막 조작이 남긴 요청 · 확인창도 놓치지 않는다
+        runner.check_dismissed()
+        runner.check_blocked()
 
+    aborted = None
     try:
         exec_steps(case["steps"], "test")
         if soft_fails:
             raise AssertFail(" / ".join(soft_fails))
-    except SessionExpired:
-        raise                      # 개별 케이스 실패로 묻지 않고 전체 실행을 멈춘다
+    except SessionExpired as e:
+        # 개별 케이스 실패로 묻지 않고 전체 실행을 멈춘다. 그 전에 정리는 시도한다
+        aborted = e
+        result.update(status="ERROR", reason="세션 만료로 중단 - {}".format(e))
+    except WriteBlocked as e:
+        result.update(status="BLOCKED", reason=str(e))
     except PreconditionUnmet as e:
         # 운영 데이터가 바뀌어 검수할 대상이 없는 것. 결함도 스크립트 오류도 아니다
         result.update(status="NA", reason="조건 미충족 - {}".format(e))
@@ -914,36 +1467,87 @@ def run_case(runner, case, blocklist, dry_run):
         # ERROR 는 개발 전달에 넣지 않는다. 셀렉터가 낡아서 난 실패를 결함으로 넘기지 않기 위함이다.
         result.update(status="FAIL" if isinstance(e, AssertFail) else "ERROR",
                       reason=_reason(e))
+        if result["status"] == "ERROR" and "시간 초과" in result["reason"]:
+            fs = state["failed_step"] or {}
+            result["err_selector"] = fs.get("selector", "")
+        # 앞에서 건너뛴 스텝이 있으면 화면이 기획대로 밟은 상태가 아니다. FAIL 로 넘기지 않는다
+        if result["status"] == "FAIL" and any(s["status"] == "SKIP" for s in result["steps"]):
+            result.update(status="ERROR", reason="판정 불가 - 앞 스텝을 건너뛰어 화면 상태가 다름: "
+                          + result["reason"])
+        # 안전망이 요청을 막았거나 확인창을 취소했으면 화면 흐름이 실제 사용과 다르다.
+        # 그 뒤의 판정 실패는 결함이라고 할 수 없으므로 개발 전달로 보내지 않는다
+        if result["status"] == "FAIL" and runner.interfered:
+            result.update(status="ERROR", reason="판정 불가 - {}로 화면 흐름이 달라짐: {}{}".format(
+                " · ".join(sorted(runner.interfered)), result["reason"],
+                " / 막은 요청: " + " / ".join(runner.blocked_log[:2]) if runner.blocked_log else ""))
         try:
-            runner._shoot("{}_FAIL".format(cid))
+            runner._shoot_failure(cid, state["failed_step"])
         except Exception:
             pass
+        if runner.fail_url:
+            result["fail_url"] = runner.fail_url
         # chains 케이스는 "이어서 했기 때문인지" 를 자동으로 가린다
-        if case.get("chains"):
-            diag = diagnose_chain(runner, case, result)
+        if case.get("chains") and result["status"] == "FAIL":
+            try:
+                diag = diagnose_chain(runner, case, result, dry_run)
+            except SessionExpired as e2:
+                aborted, diag = e2, None
             if diag:
                 result["diagnosis"] = diag
-                result["reason"] += "  [{}]".format(diag)
 
     # -- 정리(cleanup)는 본 테스트 실패와 무관하게 항상 시도 --
-    if case.get("cleanup") and not dry_run and case.get("approved"):
+    # 첫 goto 전에 멈췄으면 쓰기 허용 구간이 열린 적이 없으므로 정리할 것도 없다
+    if approved_write and state["opened"]:
+        runner.allow_writes = True
+        runner.step_write = False
         try:
             exec_steps(case["cleanup"], "cleanup")
         except Exception as e:
+            result["unclean"] = True
+            # 운영 데이터를 직접 찾아 지울 수 있게 이 케이스가 입력한 값을 남긴다
+            result["unclean_inputs"] = [
+                str(st.get("value", st.get("text", ""))) for st in case["steps"]
+                if st.get("action") in ("fill", "type", "select") and is_write_step(st)][:10]
             result["reason"] += " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}".format(_reason(e)[:150])
             # 정리 실패는 테스트 데이터 문제지 구현 결함이 아니다. 개발 전달로 가지 않게 ERROR 로 둔다
             if result["status"] == "PASS":
                 result["status"] = "ERROR"
+    runner.allow_writes = False
+    runner.step_write = False
+    runner.blocklist = list(runner.spec_blocklist)
 
     result["duration"] = round(time.time() - t0, 1)
     result["shots"] = runner.shots[shots_before:]
     result["signals"] = list(runner.signals)
+    if runner.get_suspects:
+        result["get_suspects"] = list(runner.get_suspects)
+    if aborted is not None:
+        result["aborted"] = True
+        raise SessionAbort(str(aborted), result)
     return result
+
+
+def _cp949_ok(ch):
+    try:
+        ch.encode("cp949")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def safe_name(s):
+    """폴더 이름에 못 쓰는 글자 · 공백을 _ 로.
+
+    run_qa.bat 은 _last_run.txt 의 폴더 이름을 cp949 로 읽으므로 cp949 로 못 쓰는 글자도 _ 로
+    바꾼다. 그 밖의 글자는 그대로 두어 예전 실행 폴더 이름(이력)이 바뀌지 않게 한다.
+    """
+    s = re.sub(r'[\\/:*?"<>|\s]+', "_", str(s)).strip("_") or "qa"
+    return "".join(ch if _cp949_ok(ch) else "_" for ch in s)
 
 
 def _past_runs(out_root, project):
     """같은 프로젝트의 지난 실행 폴더 (results.json 있는 것만), 오래된 순."""
-    pat = re.compile(r"^{}_\d{{8}}_\d{{4,6}}$".format(re.escape(project)))
+    pat = re.compile(r"^{}_\d{{8}}_\d{{4,6}}$".format(re.escape(safe_name(project))))
     if not out_root.exists():
         return []
     return sorted((d for d in out_root.iterdir()
@@ -951,15 +1555,74 @@ def _past_runs(out_root, project):
                   key=lambda d: d.name)
 
 
+def _load_run(folder):
+    """(실행 정보, 결과 목록). 예전 형식(결과 목록만)은 실행 정보가 빈 dict.
+
+    읽을 수 없는 results.json 은 실행 정보에 _broken 을 달아 돌려준다. 하나가 깨졌다고
+    이후 실행이 모두 시작부터 멈추면 안 된다.
+    """
+    try:
+        data = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {"_broken": True}, []
+    if isinstance(data, dict):
+        return data.get("meta") or {}, data.get("results") or []
+    if isinstance(data, list):
+        return {}, data
+    return {"_broken": True}, []
+
+
 def _load_results(folder):
-    data = json.loads((folder / "results.json").read_text(encoding="utf-8"))
-    return data["results"] if isinstance(data, dict) else data
+    return _load_run(folder)[1]
 
 
-def _resolve_run(arg, past, out_root):
-    """--rerun-failed · --compare 값을 실행 폴더로. 'latest' 면 직전 실행."""
+def baseline_key(spec, spec_path):
+    """비교 기준을 고를 때 맞춰야 하는 것: 같은 스펙, 그리고 쓰기 케이스가 있으면 같은 모드.
+
+    쓰기 케이스가 없는 스펙은 dry-run 이든 아니든 같은 케이스를 같은 방식으로 돌리므로
+    모드를 가리지 않는다. 가리면 팀원 bat(dry-run)과 Claude 재검수가 서로를 못 본다.
+    """
+    return {"spec": spec_path.name,
+            "ids": {c["id"] for c in spec.get("cases", [])},
+            "mode": any(c.get("writes") for c in spec.get("cases", []))}
+
+
+def _is_baseline(meta, results, dry_run, key=None):
+    """비교 기준이 될 수 있는 실행: 전체 실행 · 중단 안 됨 · 같은 스펙 · (필요하면) 같은 모드."""
+    if meta.get("_broken") or meta.get("partial") or meta.get("aborted"):
+        return False
+    key = key or {}
+    if key.get("spec"):
+        if meta.get("spec"):
+            if meta["spec"] != key["spec"]:
+                return False
+        else:
+            # 예전 형식은 스펙 이름이 없다. 케이스 ID 가 절반 이상 겹쳐야 같은 스펙으로 본다
+            ids = {r.get("id") for r in results}
+            if not ids or len(ids & key.get("ids", set())) * 2 < len(ids):
+                return False
+    if key.get("mode", True) and "dry_run" in meta and bool(meta["dry_run"]) != bool(dry_run):
+        return False
+    return True
+
+
+def _baseline(past, dry_run, key=None):
+    for d in reversed(past):
+        meta, res = _load_run(d)
+        if _is_baseline(meta, res, dry_run, key):
+            return d
+    return None
+
+
+def _resolve_run(arg, past, out_root, dry_run=False, key=None):
+    """--rerun-failed · --compare 값을 실행 폴더로.
+
+    'latest' 는 이름순 마지막이 아니라 같은 스펙 · 같은 모드의 마지막 전체 실행이다. 한 건만 다시
+    돌린 실행, 중간에 멈춘 실행, 같은 프로젝트의 다른 스펙 실행을 기준으로 잡으면
+    "다시 돌릴 실패 없음" · "새로 실패" 가 엉뚱하게 나온다.
+    """
     if arg == "latest":
-        return past[-1] if past else None
+        return _baseline(past, dry_run, key)
     for cand in (Path(arg), out_root / arg):
         if (cand / "results.json").exists():
             return cand.resolve()
@@ -967,33 +1630,216 @@ def _resolve_run(arg, past, out_root):
 
 
 def mark_trend(results, prev_results):
-    """지난 실행 대비 변화. 개발팀이 고쳤다고 한 뒤 다시 돌릴 때 가장 먼저 보는 정보다."""
-    prev = {r["id"]: r["status"] for r in prev_results}
+    """지난 실행 대비 변화. 개발팀이 고쳤다고 한 뒤 다시 돌릴 때 가장 먼저 보는 정보다.
+
+    "계속 실패" 는 지난번에도 실패(FAIL)였을 때만 쓴다. 점검 필요였다가 실패가 된 건은
+    개발팀에는 처음 가는 건이라 "새로 실패" 다.
+    """
+    prev = {r["id"]: r for r in prev_results}
     for r in results:
-        p, now = prev.get(r["id"]), r["status"]
-        if p in BAD and now == "PASS":
+        pr = prev.get(r["id"])
+        p, now = (pr or {}).get("status"), r["status"]
+        if now == "PASS" and p in BAD:
             r["trend"] = "fixed"
-        elif p in BAD and now in BAD:
-            r["trend"] = "still"
-        elif now in BAD and p != "NA" and p not in ("SKIPPED", "BLOCKED"):
-            r["trend"] = "new"          # 지난번 통과(회귀) 또는 이번에 새로 생긴 케이스
+        elif now == "FAIL":
+            if p == "FAIL":
+                r["trend"] = "still"
+                # 계속 실패인데 실제 현상이 달라졌으면 개발팀이 일부만 고친 것일 수 있다
+                if pr.get("reason") and pr["reason"] != r["reason"]:
+                    r["changed"] = pr["reason"]
+            else:
+                r["trend"] = "new"      # 지난번 통과(회귀) · 점검 필요 · 새 케이스
+        elif now == "ERROR" and p is not None:
+            # 지난번엔 판정까지 갔는데 이번엔 못 감 (기준이 엄격해졌거나 화면 · 셀렉터가 바뀜)
+            r["trend"] = "still_err" if p == "ERROR" else "unjudged"
     return results
 
 
-def validate_spec(spec, warnings):
-    """실행 전에 잡을 수 있는 스펙 실수. 멈추지는 않고 경고로 남긴다."""
-    reqs = {q["id"] for q in spec.get("requirements", [])}
-    for c in spec.get("cases", []):
-        for rid in c.get("req") or []:
-            if reqs and rid not in reqs:
-                warnings.append("{}: requirements 에 없는 요건 ID '{}'".format(c["id"], rid))
-        for st in c.get("steps", []):
-            if st.get("soft") and not str(st.get("action", "")).startswith("expect_"):
-                warnings.append("{}: soft 는 expect_* 스텝에만 적용됨 ({})".format(
-                    c["id"], st.get("action")))
+def na_streak_warnings(results, past, n=3):
+    """같은 케이스가 n회 연속 조건 미충족이면 precondition 이 결함을 가리고 있을 수 있다."""
+    out = []
+    hist = [_load_results(d) for d in past[-(n - 1):]] if n > 1 else []
+    for r in results:
+        if r["status"] != "NA" or len(hist) < n - 1:
+            continue
+        if all(any(x["id"] == r["id"] and x["status"] == "NA" for x in h) for h in hist):
+            out.append("{}: {}회 연속 조건 미충족 - precondition 이 실제 결함을 가리고 있지 않은지 "
+                       "다른 경로로 확인 필요".format(r["id"], n))
+    return out
+
+
+# 러너가 실행 폴더에 만드는 것. 이 밖의 파일이 있으면 사람이 넣은 것이라 폴더를 지우지 않는다
+RUNNER_FILES = {"results.json", "results.json.tmp", "리포트.html", "개발전달.md", "웍스등록.txt",
+                "screenshots", "traces", "downloads"}
+
+
+def prune_outputs(out_root, project, keep, protect, max_remove=3):
+    """지난 실행 폴더 정리. 원칙은 "모르면 남긴다".
+
+    남기는 것: 최근 keep 회, protect(이번 비교 · 재검수 기준), 스펙 × 모드별 마지막 기준 실행,
+    러너 버전 정보가 없는 예전 형식 · 읽을 수 없는 실행, 운영 데이터 미정리(unclean)가 있는 실행,
+    사람이 넣은 파일이 있는 폴더. 개발 전달 근거(n_dev)는 남기되 내려받은 운영 데이터만 지운다.
+    한 번에 max_remove 개까지만 지우고, 이름을 바꾼 뒤 지워 반쯤 지워진 폴더가 이력에 섞이지 않게 한다.
+    """
+    import shutil
+    past = _past_runs(out_root, project)
+    if keep <= 0 or len(past) <= keep:
+        return []
+    hold = {d.resolve() for d in past[-keep:]} | set(protect)
+    seen = set()
+    for d in reversed(past):
+        meta, res = _load_run(d)
+        k = (meta.get("spec") or "?", bool(meta.get("dry_run")))
+        if k not in seen and _is_baseline(meta, res, meta.get("dry_run")):
+            seen.add(k)
+            hold.add(d.resolve())
+    removed = []
+    for d in past[:-keep]:
+        if len(removed) >= max_remove:
+            break
+        if d.resolve() in hold:
+            continue
+        meta, res = _load_run(d)
+        if meta.get("_broken") or not meta.get("runner"):
+            continue
+        if any(r.get("unclean") for r in res):
+            continue
+        try:
+            if any(p.name not in RUNNER_FILES for p in d.iterdir()):
+                continue
+        except OSError:
+            continue
+        if meta.get("n_dev"):
+            if (d / "downloads").exists():
+                shutil.rmtree(d / "downloads", ignore_errors=True)
+            continue
+        trash = d.with_name("_trash_" + d.name)
+        try:
+            d.rename(trash)
+        except OSError:
+            continue
+        shutil.rmtree(trash, ignore_errors=True)
+        removed.append(d.name)
+    return removed
+
+
+# trace 에서 값을 지울 헤더 · 이름 (쿠키 · 인증 · 세션 · 토큰류)
+SENSITIVE_NAME = re.compile(r"cookie|auth|token|session|csrf|xsrf|api[-_]?key|secret|passw", re.I)
+_QUERY_VALUE = re.compile(r"([?&][^=&#]+=)[^&#]*")
+
+
+def strip_trace(src):
+    """동작 기록(trace zip)에서 쿠키 · 인증값을 지운 사본을 만든다. 개발팀이 요청할 때만 쓴다.
+
+    지우는 것: 쿠키 · 저장된 로그인 상태, 이름에 auth · token · session · csrf 등이 든 헤더 값,
+    주소의 쿼리 값, xhr · fetch 요청 · 응답 본문.
+    남는 것: 화면 스냅샷(HTML) 안의 입력값 · 숨은 토큰, 화면에 보이는 운영 데이터.
+    """
+    import zipfile
+    src = Path(src)
+
+    def mask(s):
+        return _QUERY_VALUE.sub(r"\1***", s) if "?" in s else s
+
+    def clean(o):
+        if isinstance(o, dict):
+            if "name" in o and "value" in o and SENSITIVE_NAME.search(str(o["name"])):
+                o["value"] = "(삭제)"
+            for k in list(o):
+                if k in ("cookies", "storageState") and isinstance(o[k], (list, dict)):
+                    o[k] = [] if isinstance(o[k], list) else {}
+                else:
+                    o[k] = clean(o[k])
+            return o
+        if isinstance(o, list):
+            return [clean(v) for v in o]
+        if isinstance(o, str) and o.startswith(("http://", "https://")):
+            return mask(o)
+        return o
+
+    def body_refs(o, out):
+        """요청 본문 전부와 API 응답 본문(resources/<sha1>)을 지울 대상으로 모은다.
+
+        요청 본문에는 로그인 비밀번호 · 입력값이 들고, API 응답에는 토큰 · 운영 데이터가 든다.
+        """
+        snap = o.get("snapshot") if isinstance(o, dict) else None
+        if not isinstance(snap, dict):
+            return
+        req = snap.get("request") or {}
+        pd = req.get("postData")
+        if isinstance(pd, dict):
+            if pd.get("_sha1"):
+                out.add(pd["_sha1"])
+            for k in ("text", "params"):
+                if k in pd:
+                    pd[k] = "(삭제)"
+        content = (snap.get("response") or {}).get("content") or {}
+        mime = str(content.get("mimeType", "")).lower()
+        api = snap.get("_resourceType") in ("xhr", "fetch") or any(
+            m in mime for m in ("json", "xml", "text/plain", "form"))
+        if api and isinstance(content, dict):
+            if content.get("_sha1"):
+                out.add(content["_sha1"])
+            if "text" in content:
+                content["text"] = "(삭제)"
+
+    dst = src.with_name(src.stem + "_전달용.zip")
+    with zipfile.ZipFile(src) as zi:
+        drop, texts = set(), {}
+        for info in zi.infolist():
+            if info.filename.endswith((".trace", ".network")):
+                lines = []
+                for line in zi.read(info.filename).decode("utf-8", "replace").splitlines():
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        lines.append(line)
+                        continue
+                    body_refs(o, drop)
+                    lines.append(json.dumps(clean(o), ensure_ascii=False))
+                texts[info.filename] = "\n".join(lines).encode("utf-8")
+        with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zo:
+            for info in zi.infolist():
+                if info.filename.startswith("resources/") and info.filename.split("/")[-1] in drop:
+                    continue
+                zo.writestr(info, texts.get(info.filename) or zi.read(info.filename))
+    print("[*] 쿠키 · 인증값을 지운 사본: {}".format(dst))
+    print("    지운 것: 쿠키 · 로그인 상태, 인증 · 토큰 · 세션 헤더 값, 주소의 쿼리 값, API 요청 · 응답 본문")
+    print("    남는 것: 화면 스냅샷 안의 입력값 · 숨은 토큰, 화면에 보이는 운영 데이터.")
+    print("    넘기기 전에 QA 계정에서 로그아웃해 세션을 끊어 두세요.")
+    return 0
 
 
 # -- 작업 폴더 초기화 -------------------------------------------
+
+# 러너 위치는 bat 을 실행할 때 찾는다. 플러그인을 업데이트하면 설치 경로가 바뀌어
+# --init 때 박아 둔 경로는 지워지거나 구버전으로 남는다.
+# Keep this block ASCII only - Korean bytes inside for /f can break the cmd parser.
+FIND_RUNNER = r"""set "RUNNER="
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "try {{ $j = Get-Content -Raw -Encoding UTF8 (Join-Path $env:USERPROFILE '.claude\plugins\installed_plugins.json') | ConvertFrom-Json; ($j.plugins.'qa-test@claude-skills' | Select-Object -First 1).installPath }} catch {{}}" 2^>nul`) do set "RUNNER=%%P\skills\qa-test\qa_auto\qa_run.py"
+if defined RUNNER if not exist "!RUNNER!" set "RUNNER="
+if not defined RUNNER set "RUNNER=%USERPROFILE%\.claude\plugins\marketplaces\claude-skills\plugins\qa-test\skills\qa-test\qa_auto\qa_run.py"
+if not exist "!RUNNER!" set "RUNNER={runner}"
+if not exist "!RUNNER!" (
+    echo   qa-test 플러그인 설치가 필요합니다. Claude Code 에서 설치한 뒤 다시 실행하세요.
+    echo.
+    pause
+    exit /b 1
+)
+rem Old runners lack safety fixes. Stop unless RUNNER_VERSION is at least {need}.
+set "RVER=0"
+for /f "tokens=3" %%V in ('findstr /b /c:"RUNNER_VERSION = " "!RUNNER!"') do set "RVER=%%V"
+if !RVER! LSS {need} (
+    echo   qa-test 플러그인 업데이트가 필요합니다. Claude Code 에서 업데이트한 뒤 다시 실행하세요.
+    echo   [설치된 러너 버전 !RVER! / 필요 버전 {need}]
+    echo.
+    pause
+    exit /b 1
+)
+rem Use the py launcher, or the default per-user Python when py is missing.
+set "PY=py"
+py -c "" >nul 2>&1 || set "PY=%LOCALAPPDATA%\Python\bin\python.exe"
+"""
 
 BAT_TEMPLATE = """@echo off
 setlocal enabledelayedexpansion
@@ -1006,8 +1852,7 @@ echo   QA 자동화 실행
 echo ===============================================
 echo.
 
-set RUNNER="{runner}"
-
+""" + FIND_RUNNER + """
 set N=0
 for %%F in (specs\\*.json) do (
     echo %%~nF | findstr /b "_" > nul
@@ -1053,42 +1898,33 @@ exit /b 1
 
 :picked
 echo.
-echo   1. 읽기만 실행  (안전 - 쓰기 케이스는 건너뜀)
-echo   2. 전체 실행    (승인된 쓰기 케이스까지 실행)
-echo   3. 지난 실행에서 실패한 것만 다시 (읽기만)
+echo   1. 읽기만 실행  (운영 데이터에 쓰는 케이스는 건너뜀)
+echo   2. 지난 실행에서 실패한 것만 다시
+echo.
+echo   운영 데이터에 쓰는 케이스는 담당 기획자가 Claude 로 실행합니다.
 echo.
 set "MODE="
 set /p "MODE=모드 번호 입력 [기본 1]: "
 if not defined MODE set "MODE=1"
 
 set "OPT=--dry-run"
-if "%MODE%"=="3" set "OPT=--dry-run --rerun-failed latest"
-if not "%MODE%"=="2" goto :run
+if "%MODE%"=="2" set "OPT=--dry-run --rerun-failed latest"
 
-set "OPT="
 echo.
-echo   [!] 전체 실행은 운영 데이터에 쓰기가 발생합니다.
-set "OK="
-set /p "OK=계속하려면 Y 입력: "
-if /i not "%OK%"=="Y" (
-    echo   취소되었습니다.
-    pause
-    exit /b 0
-)
-
-:run
-echo.
-py %RUNNER% "!TARGET!" %OPT%
+"!PY!" "!RUNNER!" "!TARGET!" %OPT%
 set RESULT=%errorlevel%
 
-echo.
-for /f "delims=" %%D in ('dir /b /ad /o-d output 2^>nul') do (
-    start chrome "%cd%\\output\\%%D\\리포트.html"
-    goto :opened
-)
-:opened
+rem Open only this run's report. The runner writes the folder name to output\\_last_run.txt.
+set "LAST="
+if exist "output\\_last_run.txt" set /p LAST=<"output\\_last_run.txt"
+if defined LAST if exist "output\\!LAST!\\리포트.html" start "" "%cd%\\output\\!LAST!\\리포트.html"
 
 echo.
+if "%RESULT%"=="3" (
+    echo   [!] 실행이 중간에 멈췄습니다. 리포트 맨 위 안내를 확인하세요.
+    echo       로그인 세션 만료면 login_qa.bat 을 실행해 다시 로그인한 뒤 이 파일을 다시 실행하세요.
+    echo.
+)
 pause
 exit /b %RESULT%
 """
@@ -1106,7 +1942,7 @@ COOKIES_TEMPLATE = """# 크롬 F12 > Application > Cookies 에서 표 전체를 
 
 
 LOGIN_BAT_TEMPLATE = """@echo off
-setlocal
+setlocal enabledelayedexpansion
 set PYTHONIOENCODING=cp949:replace
 cd /d "%~dp0"
 
@@ -1115,19 +1951,18 @@ echo ===============================================
 echo   로그인 세션 저장
 echo ===============================================
 echo.
+
+""" + FIND_RUNNER + """
 echo   브라우저가 열리면 로그인만 하세요.
 echo   로그인이 확인되면 저장하고 창이 저절로 닫힙니다.
-echo   사이트가 여러 개면 주소를 띄어쓰기로 이어서 입력하세요.
+echo   그냥 Enter 를 누르면 스펙에 적힌 검수 주소로 로그인합니다.
+echo   다른 주소면 입력하세요 (여러 개면 띄어쓰기로 이어서).
 echo.
 
-set /p TARGET=로그인 주소 입력:
-if "%TARGET%"=="" (
-    echo   주소가 없습니다.
-    pause
-    exit /b 1
-)
+set "TARGET="
+set /p TARGET=로그인 주소 [Enter: 스펙 주소]:
 
-py "{runner}" --login %TARGET% --ws "%~dp0."
+"!PY!" "!RUNNER!" --login !TARGET! --ws "%~dp0."
 
 echo.
 pause
@@ -1296,11 +2131,11 @@ def init_workspace(target):
     # UTF-8 로 쓰면 cmd 가 배치 본문을 cp949 로 읽어 메뉴 한글이 깨지고,
     # BOM 을 붙이면 첫 줄(@echo off)까지 깨진다. 배치는 cp949, 파이썬 출력은
     # PYTHONIOENCODING 으로 맞추는 조합이 가장 안정적이다.
-    bat.write_text(BAT_TEMPLATE.format(runner=SKILL_DIR / "qa_run.py"),
+    bat.write_text(BAT_TEMPLATE.format(runner=SKILL_DIR / "qa_run.py", need=RUNNER_VERSION),
                    encoding="cp949", errors="replace")
 
     lbat = ws / "login_qa.bat"
-    lbat.write_text(LOGIN_BAT_TEMPLATE.format(runner=SKILL_DIR / "qa_run.py"),
+    lbat.write_text(LOGIN_BAT_TEMPLATE.format(runner=SKILL_DIR / "qa_run.py", need=RUNNER_VERSION),
                     encoding="cp949", errors="replace")
 
     ck = ws / "cookies.txt"
@@ -1373,32 +2208,82 @@ def _context_args(conf, name, meta, spec_path, workspace):
 
 # -- 메인 ------------------------------------------------------
 
+def resolve_spec_workspace(spec_path):
+    """스킬에 번들된 스펙(_smoke.json 등)을 돌릴 때는 스킬 폴더 대신 현재 폴더에 쓴다."""
+    try:
+        spec_path.relative_to(SKILL_DIR)
+        inside_skill = True
+    except ValueError:
+        inside_skill = False
+    if inside_skill:
+        cwd = Path.cwd().resolve()
+        try:
+            cwd.relative_to(SKILL_DIR.parent.resolve())
+            # 스킬 폴더 안에서 돌리면 스킬 폴더에 결과가 쌓인다. 임시 폴더로 보낸다
+            import tempfile
+            return Path(tempfile.gettempdir()) / "qa-test-smoke"
+        except ValueError:
+            pass
+        return cwd / "qa_auto" if (cwd / "qa_auto").is_dir() else cwd
+    return resolve_workspace(spec_path)
+
+
+def spec_login_urls(ws):
+    """작업 폴더 스펙들의 검수 주소. login_qa.bat 에서 주소를 비워 두면 이걸로 로그인한다."""
+    urls = []
+    for p in sorted((ws / "specs").glob("*.json")):
+        if p.name.startswith("_"):
+            continue
+        try:
+            meta = json.loads(p.read_text(encoding="utf-8")).get("meta", {})
+        except Exception:
+            continue
+        u = str(meta.get("base_url", ""))
+        if u.startswith("http") and u not in urls:
+            urls.append(u)
+    return urls
+
+
+ICONS = {"PASS": "O", "FAIL": "X", "ERROR": "E", "NA": "~", "SKIPPED": "-",
+         "BLOCKED": "!", "FLAKY": "?"}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("spec", nargs="?", help="spec.json 경로")
     ap.add_argument("--init", metavar="DIR",
                     help="해당 폴더에 작업 폴더(qa_auto/)와 실행 배치파일을 만든다")
-    ap.add_argument("--login", metavar="URL", nargs="+",
-                    help="로그인 창을 띄워 세션을 auth.json 으로 저장한다. 여러 주소면 차례로 로그인")
+    ap.add_argument("--login", metavar="URL", nargs="*",
+                    help="로그인 창을 띄워 세션을 auth.json 으로 저장한다. 여러 주소면 차례로 로그인. "
+                         "주소를 비우면 --ws 의 스펙에 적힌 검수 주소")
     ap.add_argument("--done-text", metavar="TEXT",
                     help="--login 에서 로그인 완료로 볼 문구 (예: 로그아웃). 없으면 화면으로 자동 판정")
     ap.add_argument("--ws", metavar="DIR", default="qa_auto",
                     help="--login 이 저장할 작업 폴더 (기본: ./qa_auto)")
-    ap.add_argument("--dry-run", action="store_true", help="쓰기 스텝 전부 건너뜀")
+    ap.add_argument("--strip-trace", metavar="ZIP",
+                    help="동작 기록(trace zip)에서 쿠키 · 인증 헤더를 지운 사본을 만든다")
+    ap.add_argument("--dry-run", action="store_true", help="쓰기 케이스 전부 건너뜀")
     ap.add_argument("--headed", action="store_true", help="브라우저 표시")
     ap.add_argument("--case", help="특정 케이스 ID만 실행 (쉼표로 여러 개)")
     ap.add_argument("--rerun-failed", metavar="RUN",
-                    help="지난 실행(결과 폴더 또는 latest)에서 실패·점검 필요였던 케이스만 실행")
+                    help="지난 실행(결과 폴더 또는 latest)에서 실패 · 점검 필요 · 불안정이었던 케이스만 실행")
     ap.add_argument("--compare", metavar="RUN",
-                    help="비교 기준 실행 폴더 (기본: --rerun-failed 대상 또는 직전 실행)")
+                    help="비교 기준 실행 폴더 (기본: 같은 모드의 마지막 전체 실행)")
     ap.add_argument("--no-retry", action="store_true", help="실패 케이스 1회 재실행 끄기")
     ap.add_argument("--no-trace", action="store_true", help="실패 케이스 동작 기록(trace) 끄기")
     args = ap.parse_args()
 
     if args.init:
         return init_workspace(Path(args.init).resolve())
-    if args.login:
-        return do_login(args.login, Path(args.ws).resolve(), args.done_text)
+    if args.login is not None:
+        ws = Path(args.ws).resolve()
+        urls = args.login or spec_login_urls(ws)
+        if not urls:
+            print("[!] 로그인 주소가 없습니다. 주소를 입력하거나 specs 폴더에 스펙을 먼저 만드세요.")
+            return 1
+        return do_login(urls, ws, args.done_text)
+    if args.strip_trace:
+        return strip_trace(args.strip_trace)
     if not args.spec:
         ap.error("spec 경로가 필요하다 (또는 --init DIR / --login URL)")
 
@@ -1407,11 +2292,32 @@ def main():
         spec_path = (SKILL_DIR / args.spec).resolve()
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
 
-    workspace = resolve_workspace(spec_path)
+    workspace = resolve_spec_workspace(spec_path)
     meta = spec["meta"]
+    project = safe_name(meta["project"])
     out_root = workspace / "output"
-    past = _past_runs(out_root, meta["project"])
+    last_file = out_root / "_last_run.txt"
+    try:
+        last_file.unlink()          # bat 이 지난 실행 리포트를 이번 것으로 착각해 열지 않게
+    except Exception:
+        pass
 
+    # 새 키를 모르는 구버전 러너가 조용히 무시하고 돌면 precondition 이 빠진 채 결함이 넘어간다
+    need = int(meta.get("runner_min", 0) or 0)
+    if need > RUNNER_VERSION:
+        print("[!] 이 스펙은 러너 버전 {} 이상이 필요합니다 (설치된 러너: {}).".format(need, RUNNER_VERSION))
+        print("    qa-test 플러그인을 업데이트한 뒤 다시 실행하세요.")
+        return 1
+
+    # 개발 전달로 가는 값(kind · severity · source)이 틀리면 엉뚱한 건이 개발팀에 간다
+    errs = spec_errors(spec)
+    if errs:
+        print("[!] 스펙 오류 - 실행하지 않았습니다:")
+        for e in errs:
+            print("    - " + e)
+        return 1
+
+    past = _past_runs(out_root, project)
     cases = spec["cases"]
     if args.case:
         ids = [x.strip() for x in args.case.split(",") if x.strip()]
@@ -1419,64 +2325,55 @@ def main():
         missing = [i for i in ids if i not in {c["id"] for c in cases}]
         if missing:
             print("[!] 케이스 없음: {}".format(", ".join(missing)))
-            sys.exit(1)
+            return 1
 
     # 재검수: 개발팀이 고쳤다고 한 뒤 지난번 실패만 다시 돌린다
+    key = baseline_key(spec, spec_path)
     rerun_base = None
     if args.rerun_failed:
-        rerun_base = _resolve_run(args.rerun_failed, past, out_root)
+        rerun_base = _resolve_run(args.rerun_failed, past, out_root, args.dry_run, key)
         if rerun_base is None:
-            print("[!] 지난 실행 결과를 찾을 수 없음: {}".format(args.rerun_failed))
-            sys.exit(1)
-        bad_ids = {r["id"] for r in _load_results(rerun_base) if r["status"] in BAD}
+            print("[!] 다시 돌릴 기준 실행을 찾을 수 없음: {} (같은 스펙의 전체 실행이 필요)".format(
+                args.rerun_failed))
+            return 1
+        bad_ids = {r["id"] for r in _load_results(rerun_base) if r["status"] in RERUN}
         cases = [c for c in cases if c["id"] in bad_ids]
-        print("[*] 재검수 기준: {} (실패·점검 필요 {}건)".format(rerun_base.name, len(cases)))
+        print("[*] 재검수 기준: {} (실패 · 점검 필요 · 불안정 {}건)".format(rerun_base.name, len(cases)))
         if not cases:
             print("[*] 지난 실행에 다시 돌릴 실패가 없습니다.")
             return 0
 
-    compare_base = (_resolve_run(args.compare, past, out_root) if args.compare
-                    else rerun_base or (past[-1] if past else None))
+    compare_base = (_resolve_run(args.compare, past, out_root, args.dry_run, key) if args.compare
+                    else rerun_base or _baseline(past, args.dry_run, key))
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = out_root / "{}_{}".format(meta["project"], stamp)
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = out_root / "{}_{}".format(project, run_id)
     shot_dir = out_dir / "screenshots"
     shot_dir.mkdir(parents=True, exist_ok=True)
+    last_file.write_text(out_dir.name, encoding="cp949", errors="replace")
 
     print("[*] 대상: {}".format(meta["base_url"].replace("{QA_ROOT}", SKILL_DIR.as_uri())))
     print("[*] 작업폴더: {}".format(workspace))
     print("[*] 케이스: {}건{}".format(
         len(cases), "  (DRY-RUN - 쓰기 없음)" if args.dry_run else ""))
 
-    # 잔여 데이터 점검: 승인된 쓰기 케이스가 실제로 돈 경우에만 마지막에 한 번
     rc = meta.get("residue_check")
     if isinstance(rc, list):
         rc = {"steps": rc}
-    wrote = not args.dry_run and any(c.get("writes") and c.get("approved") for c in cases)
-    residue = None
-    if rc and wrote:
-        residue = {"id": "QA-잔여", "title": "테스트 데이터 잔여 확인",
-                   "requirement": "쓰기 케이스가 만든 {} 데이터가 남아 있지 않아야 한다".format(
-                       meta.get("qa_prefix", "")),
-                   "source": "meta.residue_check", "kind": "qa", "writes": False,
-                   "session": rc.get("session", ""), "steps": rc.get("steps", [])}
-        if not residue["session"]:
-            residue.pop("session")
 
     # 세션: meta 의 auth/cookies/user_agent/login_check 가 기본 세션이고, meta.sessions 에
     # 이름 붙인 세션을 더 둘 수 있다 ({} 면 비로그인). 케이스의 "session" 으로 고른다.
-    # 비회원·회원·어드민처럼 로그인 상태가 다른 화면을 스펙 하나, 리포트 하나로 묶기 위함이다.
     sessions = {"": {k: meta[k] for k in SESSION_KEYS if k in meta}}
     sessions[""]["label"] = meta.get("session_label", "")
     sessions.update(meta.get("sessions") or {})
-    all_cases = cases + ([residue] if residue else [])
-    unknown = sorted({c.get("session") for c in all_cases if c.get("session", "") not in sessions})
+    rc_session = (rc or {}).get("session", "")
+    unknown = sorted({c.get("session") for c in cases if c.get("session", "") not in sessions}
+                     | ({rc_session} if rc_session not in sessions else set()))
     if unknown:
         print("[!] meta.sessions 에 없는 session: {}".format(", ".join(unknown)))
-        sys.exit(1)
+        return 1
     used = []
-    for c in all_cases:
-        name = c.get("session", "")
+    for name in [c.get("session", "") for c in cases] + ([rc_session] if rc else []):
         if name not in used:
             used.append(name)
     ctx_args = {name: _context_args(sessions[name], name, meta, spec_path, workspace) for name in used}
@@ -1485,105 +2382,229 @@ def main():
     trace_dir = out_dir / "traces"
     blocklist = spec.get("blocklist", [])
     results = []
+    aborted = None
+    runner = Runner(None, spec, spec_path, shot_dir, workspace, run_id)
+    runner.warnings += spec_warnings(spec)
+    timeout_hits = {}
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not args.headed)
-        pages, runner = {}, None
+        pages, contexts = {}, {}
 
         def page_for(name):
-            """세션별 컨텍스트는 그 세션을 처음 쓰는 케이스에서 만든다."""
-            if name not in pages:
+            """세션별 컨텍스트는 그 세션을 처음 쓰는 케이스에서 만든다.
+
+            페이지가 닫혔으면(사이트가 window.close 를 부름 등) 같은 컨텍스트에서 새로 연다.
+            """
+            pg = pages.get(name)
+            if pg is not None and not pg.is_closed():
+                return pg
+            if pg is None:
                 ctx = browser.new_context(**ctx_args[name])
+                runner.guard_context(ctx)
                 if sessions[name].get("cookies"):
                     ctx.add_cookies(load_cookies(spec_path, sessions[name]["cookies"], workspace))
                 if trace:
                     # 실패 케이스의 동작을 그대로 재생할 수 있게 남긴다. 통과 케이스 기록은 버린다
                     ctx.tracing.start(screenshots=True, snapshots=True)
-                pg = ctx.new_page()
-                if runner is not None:
-                    runner.attach(pg)
-                pages[name] = pg
-            return pages[name]
+                ctx.on("page", runner.on_new_page)
+                contexts[name] = ctx
+            runner.opening = True
+            try:
+                pg = contexts[name].new_page()
+            finally:
+                runner.opening = False
+            runner.attach(pg)
+            pages[name] = pg
+            return pg
 
-        runner = Runner(page_for(used[0] if used else ""), spec, spec_path, shot_dir, workspace)
-        validate_spec(spec, runner.warnings)
+        def close_others(page):
+            """케이스를 시작할 때 지금 페이지 말고 같은 세션에 열린 창(팝업)을 닫는다."""
+            for other in list(page.context.pages):
+                if other is not page:
+                    try:
+                        other.close()
+                    except Exception:
+                        pass
+
+        def keep_try1(r):
+            """재실행하면 같은 파일명으로 덮어쓰므로 1차 스크린샷은 _try1 을 붙여 남긴다."""
+            kept = []
+            for n in r.get("shots", []):
+                src = shot_dir / n
+                dst = shot_dir / (Path(n).stem + "_try1" + Path(n).suffix)
+                try:
+                    src.replace(dst)
+                    kept.append(dst.name)
+                except Exception:
+                    pass
+            runner.shots = [s for s in runner.shots if s not in r.get("shots", [])] + kept
+            return kept
 
         def run_one(case):
             name = case.get("session", "")
             runner.use_page(page_for(name), sessions[name].get("login_check"))
+            close_others(runner.page)
             tracing = runner.page.context.tracing
             if trace:
                 tracing.start_chunk(title=case["id"])
-            r = run_case(runner, case, blocklist, args.dry_run)
-            # 한 번 실패로 단정하지 않는다. 서버가 잠깐 느렸던 건지 진짜 결함인지 가린다.
-            # 쓰기 케이스는 운영 데이터를 한 번 더 만들게 되므로 재실행하지 않는다.
-            if r["status"] in BAD and not args.no_retry and not case.get("writes"):
-                first = r["reason"]
+            try:
                 r = run_case(runner, case, blocklist, args.dry_run)
-                if r["status"] == "PASS":
-                    r["flaky"] = first
-                else:
-                    r["retried"] = True
-            if trace:
-                if r["status"] in BAD:
-                    trace_dir.mkdir(parents=True, exist_ok=True)
-                    tname = re.sub(r'[\\/:*?"<>|]', "_", case["id"]) + ".zip"
-                    tracing.stop_chunk(path=str(trace_dir / tname))
-                    r["trace"] = "traces/" + tname
-                else:
-                    tracing.stop_chunk()
+                sel = r.get("err_selector")
+                if sel:
+                    timeout_hits[sel] = timeout_hits.get(sel, 0) + 1
+                # 한 번 실패로 단정하지 않는다. 서버가 잠깐 느렸던 건지 진짜 결함인지 가린다.
+                # 쓰기 케이스는 운영 데이터를 한 번 더 만들게 되므로 재실행하지 않는다.
+                # 같은 셀렉터가 여러 케이스에서 시간 초과면 화면 구조가 바뀐 것이라 재실행해도 소용없다.
+                if (r["status"] in BAD and not args.no_retry and not r["writes"]
+                        and timeout_hits.get(sel, 0) < 2):
+                    first = r
+                    shots1 = keep_try1(first)
+                    r = run_case(runner, case, blocklist, args.dry_run)
+                    r["duration"] = round(first["duration"] + r["duration"], 1)
+                    r["try1"] = {"status": first["status"], "reason": first["reason"], "shots": shots1}
+                    r["shots"] = shots1 + r["shots"]
+                    if r["status"] == "PASS" and first["status"] == "FAIL":
+                        # 화면이 기대와 달랐다가 다시 보니 맞았다. 통과로 덮지 않고 기획팀이 본다
+                        r.update(status="FLAKY", reason="1차 실패, 재실행 통과 - " + first["reason"])
+                    elif r["status"] == "PASS":
+                        r["flaky"] = first["reason"]
+                    else:
+                        r["retried"] = True
+            finally:
+                if trace:
+                    try:
+                        bad = "r" in locals() and r["status"] in BAD + ("FLAKY",)
+                        if bad:
+                            trace_dir.mkdir(parents=True, exist_ok=True)
+                            tname = safe_name(case["id"]) + ".zip"
+                            tracing.stop_chunk(path=str(trace_dir / tname))
+                            r["trace"] = "traces/" + tname
+                        else:
+                            tracing.stop_chunk()
+                    except Exception:
+                        pass
             r["session"] = sessions[name].get("label") or name
-            icon = {"PASS": "O", "FAIL": "X", "ERROR": "E", "NA": "~",
-                    "SKIPPED": "-", "BLOCKED": "!"}[r["status"]]
             tag = " ({})".format(r["session"]) if r["session"] else ""
             if r.get("flaky"):
                 tag += " [재실행 통과]"
-            print("  [{}] {}{} {}  {}".format(icon, r["id"], tag, r["title"][:50], r["reason"][:60]))
+            print("  [{}] {}{} {}  {}".format(ICONS[r["status"]], r["id"], tag, r["title"][:50],
+                                             r["reason"][:60]))
             return r
 
-        name = ""
         try:
-            for case in cases:
-                name = case.get("session", "")
-                results.append(run_one(case))
-            if residue:
-                name = residue.get("session", "")
-                if any(is_write_step(s) for s in residue["steps"]):
+            for n, case in enumerate(cases, 1):
+                try:
+                    results.append(run_one(case))
+                except SessionAbort as e:
+                    e.result["session"] = sessions[case.get("session", "")].get("label") or case.get("session", "")
+                    results.append(e.result)
+                    aborted = {"at": n, "total": len(cases), "case": case["id"], "msg": str(e),
+                               "why": "session"}
+                    lbl = e.result["session"]
+                    print("\n[!] 실행 중단 - {}{}".format("[{}] ".format(lbl) if lbl else "", e))
+                    break
+                except Exception as e:
+                    # 브라우저가 죽었거나 쿠키 파일이 깨지는 등 케이스 밖의 문제. 그때까지 결과로 리포트는 남긴다
+                    aborted = {"at": n, "total": len(cases), "case": case["id"],
+                               "msg": _reason(e), "why": "error"}
+                    print("\n[!] 실행 중단 - {}: {}".format(case["id"], _reason(e)))
+                    break
+
+            # 잔여 데이터 점검: 승인된 쓰기 케이스가 실제로 돈 경우에만 마지막에 한 번
+            wrote = any(r["writes"] and r["approved"] and r["status"] not in ("SKIPPED", "BLOCKED")
+                        for r in results)
+            if rc and wrote and not aborted:
+                residue = {"id": "QA-잔여", "title": "테스트 데이터 잔여 확인",
+                           "requirement": "쓰기 케이스가 만든 {} 데이터가 남아 있지 않아야 한다".format(
+                               runner.qa_prefix),
+                           "source": "meta.residue_check", "kind": "qa", "writes": False,
+                           "anchor": rc.get("anchor"), "steps": rc.get("steps", [])}
+                if rc_session:
+                    residue["session"] = rc_session
+                if case_write_steps(residue):
                     r = run_case(runner, dict(residue, steps=[]), blocklist, args.dry_run)
                     r.update(status="BLOCKED", reason="residue_check 에 쓰기 스텝이 있음 - 읽기만 가능")
                 else:
-                    r = run_one(residue)
+                    try:
+                        r = run_one(residue)
+                    except SessionAbort as e:
+                        r = e.result
                 if r["status"] != "PASS":
                     runner.warnings.append(
                         "테스트 데이터가 남아 있을 수 있음 - 수동 확인 필요: {}".format(r["reason"]))
                 results.append(r)
-        except SessionExpired as e:
-            browser.close()
-            print("\n[!] 실행 중단 - {}{}".format(
-                "[{}] ".format(sessions[name].get("label") or name) if name else "", e))
-            print("    py qa_run.py --login <URL> --ws <작업폴더>  로 세션을 갱신하세요.")
-            return 2
+        except Exception as e:
+            if not aborted:
+                aborted = {"at": len(results), "total": len(cases), "case": "-",
+                           "msg": _reason(e), "why": "error"}
+                print("\n[!] 실행 중단 - {}".format(_reason(e)))
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
-        browser.close()
+    for sel, n in timeout_hits.items():
+        if n >= 2:
+            runner.warnings.append(
+                "셀렉터 갱신 필요: {} 가 {}건에서 시간 초과 - 화면 구조가 바뀐 것으로 보임. "
+                "Claude 에게 '{} 셀렉터 갱신해줘' 라고 요청".format(sel, n, spec_path.stem))
+    runner.warnings += na_streak_warnings(results, past)
 
     prev = None
     if compare_base is not None:
         mark_trend(results, _load_results(compare_base))
         prev = {"name": compare_base.name}
 
+    run_meta = {
+        "run_id": run_id, "spec": spec_path.name, "runner": RUNNER_VERSION,
+        "dry_run": bool(args.dry_run), "partial": bool(args.case or args.rerun_failed),
+        "aborted": bool(aborted), "case_ids": [c["id"] for c in cases],
+        "n_dev": len(_dev_items(results)),
+    }
+    if aborted:
+        run_meta["aborted_info"] = aborted
     report_path = build_report(spec, results, runner.warnings, out_dir,
                                args.dry_run, str(spec_path), prev=prev,
-                               partial=bool(args.case or args.rerun_failed))
-    count = {k: sum(1 for r in results if r["status"] == k) for k in ("PASS", "FAIL", "ERROR", "NA")}
-    print("\n[*] 결과: 통과 {} / 실패 {} / 점검 필요 {} / 조건 미충족 {} / 전체 {}".format(
-        count["PASS"], count["FAIL"], count["ERROR"], count["NA"], len(results)))
+                               partial=run_meta["partial"], run_meta=run_meta)
+
+    # 지난 실행 정리: 최근 N회 · 비교 기준 · 예전 형식 · 사람이 넣은 파일은 남긴다
+    protect = {d.resolve() for d in (compare_base, rerun_base, out_dir) if d is not None}
+    try:
+        removed = prune_outputs(out_root, project, int(meta.get("keep_runs", 10)), protect)
+    except Exception as e:
+        removed = []
+        print("[!] 지난 실행 정리 건너뜀: {}".format(_reason(e)))
+    if removed:
+        print("[*] 오래된 실행 {}개 정리".format(len(removed)))
+
+    count = {k: sum(1 for r in results if r["status"] == k)
+             for k in ("PASS", "FAIL", "ERROR", "NA", "FLAKY")}
+    print("\n[*] 결과: 통과 {} / 실패 {} / 점검 필요 {} / 불안정 {} / 조건 미충족 {} / 전체 {}".format(
+        count["PASS"], count["FAIL"], count["ERROR"], count["FLAKY"], count["NA"], len(results)))
     if prev:
         tr = [r.get("trend") for r in results]
-        print("[*] 지난 실행({}) 대비: 수정됨 {} / 계속 실패 {} / 새로 실패 {}".format(
-            prev["name"], tr.count("fixed"), tr.count("still"), tr.count("new")))
+        print("[*] 지난 실행({}) 대비: 수정됨 {} / 계속 실패 {} / 새로 실패 {} / 판정 불가로 바뀜 {} / "
+              "계속 점검 필요 {}".format(prev["name"], tr.count("fixed"), tr.count("still"), tr.count("new"),
+                                     tr.count("unjudged"), tr.count("still_err")))
     print("[*] 리포트: {}".format(report_path))
-    n_dev = len(_dev_items(results))
-    if n_dev:
+    n_dev = run_meta["n_dev"]
+    if n_dev and not aborted:
         print("[*] 개발 전달용 {}건: {}".format(n_dev, out_dir / "개발전달.md"))
+    unclean = [r["id"] for r in results if r.get("unclean")]
+    if unclean:
+        print("[!] 정리되지 않은 쓰기 케이스: {} - 운영 데이터 수동 확인 필요".format(", ".join(unclean)))
+    if aborted:
+        if aborted.get("why") == "session":
+            print("[!] 세션 만료로 {}번째 케이스에서 멈췄습니다. 그때까지 결과로 리포트를 만들었습니다.".format(
+                aborted["at"]))
+            print("    login_qa.bat (또는 py qa_run.py --login <URL> --ws <작업폴더>) 로 로그인한 뒤 다시 실행하세요.")
+        else:
+            print("[!] {}번째 케이스에서 실행이 멈췄습니다 ({}). 그때까지 결과로 리포트를 만들었습니다.".format(
+                aborted["at"], aborted["msg"][:120]))
+        print("    중단된 실행은 개발팀에 전달하지 않습니다.")
+        return EXIT_ABORT
     return 1 if count["FAIL"] or count["ERROR"] else 0
 
 
