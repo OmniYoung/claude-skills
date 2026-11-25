@@ -61,8 +61,11 @@ TREND_META = {"fixed": "수정됨", "still": "계속 실패", "new": "새로 실
 TREND_TONE = {"still": " k-red", "new": " k-red", "unjudged": " k-warn", "still_err": " k-warn"}
 OTHER_AREA = "기타"
 
-# 실패 시점 주소에서 가릴 쿼리 이름 (세션 · 토큰류)
-_SECRET_Q = re.compile(r"([?&](?:[^=&#]*(?:token|sid|session|auth|key|code|pass|pw|csrf)[^=&#]*)=)[^&#]*", re.I)
+# 실패 시점 주소에서 가릴 쿼리 · fragment 이름 (세션 · 토큰류). 이름 전체가 같을 때만 가린다.
+# goods_code · keyword 같은 값은 개발팀이 재현에 써야 하므로 남긴다
+_SECRET_NAMES = ("sid", "jsessionid", "phpsessid", "token", "access_token", "refresh_token", "session", "auth",
+                 "csrf", "password", "pw", "apikey", "api_key")
+_SECRET_Q = re.compile(r"([?&#;](?:{})=)[^&#]*".format("|".join(_SECRET_NAMES)), re.I)
 
 
 def _mask_url(u):
@@ -850,6 +853,9 @@ def _aborted_html(run_meta, results):
         head = "로그인 세션 만료로 {at}번째 케이스({cid})에서 멈췄습니다.".format(
             at=info["at"], cid=_esc(info["case"]))
         how = "login_qa.bat 으로 다시 로그인한 뒤 실행합니다."
+        if info.get("note"):
+            # 실행 중 막은 요청 (토큰 갱신 POST 를 막아 로그아웃된 경우 다시 로그인해도 같다)
+            how += "<br>" + _esc(info["note"])
     return ('<div class="alert"><b>{head}</b> 전체 {total}건 중 {done}건 결과이며, 개발팀에 전달하지 '
             '않습니다. {how}{ul}</div>').format(
         head=head, total=info["total"], done=min(len(results), info["total"]), how=how, ul=ul)

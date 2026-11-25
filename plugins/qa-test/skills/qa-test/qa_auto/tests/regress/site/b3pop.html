@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>미리보기</title></head>
+<body><h1>미리보기</h1>
+<script>
+// 남겨진 팝업: 부모 창이 다른 문서로 바뀌면(재실행이 시작되면) 그때부터 주기적으로 POST (R3-22)
+var doc0 = null;
+try { doc0 = opener && opener.document; } catch (e) { doc0 = null; }
+var go = false;
+setInterval(function () {
+  if (!go) {
+    var now;
+    try { now = opener && opener.document; } catch (e) { now = 'other'; }
+    if (now !== doc0) { go = true; }
+  }
+  if (go) { fetch('/api/write?what=leftpop', {method: 'POST'}).catch(function () {}); }
+}, 150);
+</script>
+</body></html>

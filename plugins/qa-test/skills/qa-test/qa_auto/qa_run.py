@@ -348,9 +348,10 @@ INTERFERE_POPUP = "다른 창 요청 차단"   # 같은 세션에서 열린 팝�
 # 막힌 요청 사유에는 설정 키를 적지 않는다. 키를 보고 쓰기 주소를 allow_post 에 넣으면 dry-run 이 운영에 쓴다.
 # 분류(조회 · 로그 · 실제 쓰기)는 SKILL 2단계 절차로 한다. {} 는 "POST /경로" (검수 주소 앞부분은 뺌)
 REASON_REQUEST_BLOCKED = "안전망이 서버 요청을 막음: {}. 조회 · 로그 · 실제 쓰기 중 무엇인지 분류가 필요합니다."
-# write:false 로 둔 클릭 직후 쓰기 요청을 막았을 때 (빈 폼 제출 검증 케이스 등). 상태는 점검 필요(ERROR)
-REASON_WRITE_FALSE_SENT = ("write:false 로 둔 버튼이 서버 쓰기 요청을 보냄: {} - 입력 검증 누락(결함 후보)이거나 "
-                           "write:false 판단 오류. allow_post 대상 아님")
+# write:false 로 둔 클릭 직후 서버 요청을 막았을 때. 조회 POST 버튼일 수도, 빈 폼 제출 검증 케이스의
+# 검증 누락일 수도 있다. 어느 쪽인지는 SKILL 2단계 분류 절차로 가린다. 상태는 점검 필요(ERROR)
+REASON_WRITE_FALSE_SENT = ("write:false 로 둔 버튼이 서버 요청을 보냄: {} - 조회 요청인지, "
+                           "입력 검증 누락(결함 후보)인지 확인이 필요합니다.")
 REASON_GUARD_ERROR = "안전망 처리 오류로 막음: {} {}"
 REASON_DIALOG_DISMISSED = ("확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 문구만 확인하려면 "
                            "다음 스텝에 expect_dialog 를 둔다")
@@ -360,6 +361,10 @@ REASON_INTERFERED_BLOCKED = " / 막은 요청: {}"   # REASON_INTERFERED 의 {bl
 REASON_TIMEOUT = "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 ({})"
 REASON_DOWNLOAD_TIMEOUT = "파일이 내려오지 않음 - 시간 초과 ({}초)"
 REASON_SESSION = "세션 만료로 중단 - {}"
+# 세션 만료 사유 · 중단 알림 · 콘솔 끝에 붙인다. 토큰 갱신 POST 를 안전망이 막아 앱이 스스로 로그아웃한 경우
+# 다시 로그인해도 같은 결과라서. {} 는 실행 중 최근에 막은 요청 (Runner.recent_blocked, "POST /경로")
+REASON_SESSION_BLOCKED = ("직전에 막은 요청: {} - 로그인 유지 요청이면 다시 로그인해도 같은 결과가 납니다. "
+                          "Claude 에게 \"막힌 요청 분류해줘\" 라고 요청합니다.")
 REASON_NA = "조건 미충족 - {}"
 REASON_PRE_UNKNOWN = "조건 확인 불가 - {} (anchor 가 없거나 안 보임)"
 REASON_PRE_INTERFERED = "조건 확인 불가 - 안전망 개입({what})으로 화면 흐름이 실제와 다름: {reason}{blocked}"
@@ -454,6 +459,9 @@ class Runner:
         self.watch_get = False
         self.blocked = []          # 막은 요청 (판정에 영향). 스텝 판정 때 비운다
         self.blocked_log = []      # 이 케이스에서 막은 요청 전부 (사유에 싣는다)
+        # 실행 전체에서 최근에 막은 요청 3줄. 케이스 시작 때 비우지 않는다. 앞 케이스에서 막은 토큰 갱신 POST 때문에
+        # 다음 케이스가 로그인 화면으로 가면 세션 만료 안내에 같이 싣는다
+        self.recent_blocked = []
         self.interfered = set()    # 이 케이스에서 막은 것 ("요청 차단" · "확인창 취소")
         self.anchor = None         # 케이스 기본 anchor
         self.fail_url = ""         # 실패 시점 주소
@@ -548,7 +556,16 @@ class Runner:
             self.blocked.append(line)
         if line not in self.blocked_log:
             self.blocked_log.append(line)
+        if line in self.recent_blocked:
+            self.recent_blocked.remove(line)
+        self.recent_blocked = (self.recent_blocked + [line])[-3:]
         self.interfered.add(INTERFERE_REQUEST)
+
+    def session_note(self):
+        """세션 만료 안내에 붙일 한 줄. 실행 중 막은 요청이 없으면 빈 문자열."""
+        if not self.recent_blocked:
+            return ""
+        return REASON_SESSION_BLOCKED.format(" / ".join(self.recent_blocked))
 
     def _short(self, url):
         """사유에 싣는 주소. 검수 주소와 같은 출처면 경로부터(allow_post 에 적는 형식), 다른 곳이면 주소 전체."""
@@ -678,9 +695,10 @@ class Runner:
                 except Exception:
                     body_hit = False
             if url_hit or body_hit:
+                note = self.session_note()
                 raise SessionExpired(
                     "로그인 세션이 만료된 것으로 보인다 (현재 URL: {}). "
-                    "인증 파일을 갱신한 뒤 다시 실행할 것.".format(self.page.url))
+                    "인증 파일을 갱신한 뒤 다시 실행할 것.{}".format(self.page.url, " / " + note if note else ""))
 
     def _warn_prefix(self, value, case_id, idx):
         """테스트로 만든 데이터인지 눈으로 구분되게 QA 프리픽스를 권한다.
@@ -1915,7 +1933,8 @@ def prune_outputs(out_root, project, keep, protect, max_remove=3):
     남기는 것: 최근 keep 회, protect(이번 비교 · 재검수 기준), 스펙 × 모드별 마지막 기준 실행,
     러너 버전 정보가 없는 예전 형식 · 읽을 수 없는 실행, 운영 데이터 미정리(unclean)가 있는 실행,
     사람이 넣은 파일이 있는 폴더. 개발 전달 근거(n_dev)는 남기되 내려받은 운영 데이터만 지운다.
-    한 번에 max_remove 개까지만 지우고, 이름을 바꾼 뒤 지워 반쯤 지워진 폴더가 이력에 섞이지 않게 한다.
+    한 번에 max_remove 개까지만 지우고(n_dev 실행의 downloads 폴더 삭제도 같이 센다), 이름을 바꾼 뒤 지워
+    반쯤 지워진 폴더가 이력에 섞이지 않게 한다. 돌려주는 것은 통째로 지운 실행 폴더 이름.
     """
     import shutil
     past = _past_runs(out_root, project)
@@ -1930,8 +1949,9 @@ def prune_outputs(out_root, project, keep, protect, max_remove=3):
             seen.add(k)
             hold.add(d.resolve())
     removed = []
+    n_rm = 0          # 이번에 지운 폴더 수 (실행 폴더 + downloads 폴더). 보안 프로그램의 대량 삭제 차단 대비
     for d in past[:-keep]:
-        if len(removed) >= max_remove:
+        if n_rm >= max_remove:
             break
         if d.resolve() in hold:
             continue
@@ -1948,6 +1968,7 @@ def prune_outputs(out_root, project, keep, protect, max_remove=3):
         if meta.get("n_dev"):
             if (d / "downloads").exists():
                 shutil.rmtree(d / "downloads", ignore_errors=True)
+                n_rm += 1
             continue
         trash = d.with_name("_trash_" + d.name)
         try:
@@ -1956,26 +1977,52 @@ def prune_outputs(out_root, project, keep, protect, max_remove=3):
             continue
         shutil.rmtree(trash, ignore_errors=True)
         removed.append(d.name)
+        n_rm += 1
     return removed
 
 
 # trace 에서 값을 지울 헤더 · 이름 (쿠키 · 인증 · 세션 · 토큰류)
 SENSITIVE_NAME = re.compile(r"cookie|auth|token|session|csrf|xsrf|api[-_]?key|secret|passw", re.I)
-_QUERY_VALUE = re.compile(r"([?&][^=&#]+=)[^&#]*")
+_QUERY_VALUE = re.compile(r"([?&#;][^=&#?]+=)[^&#]*")
+# 문자열 안 어디에 있든 주소를 찾는다 (로그 문장 "navigating to \"http://…?sid=…\"" · Referer 등)
+_URL_IN_TEXT = re.compile(r"https?://[^\s\"'\\]+")
+
+
+def _mask_trace_url(u):
+    """주소의 쿼리 · fragment 값을 *** 로. 경로는 그대로 둔다."""
+    cut = [i for i in (u.find("?"), u.find("#"), u.find(";")) if i >= 0]
+    if not cut:
+        return u
+    i = min(cut)
+    return u[:i] + _QUERY_VALUE.sub(r"\1***", u[i:])
+
+
+def _async_request(req, mime=""):
+    """비동기 요청(XHR · fetch)인지 요청 헤더로 본다. trace 에는 요청 종류(resourceType)가 없다.
+
+    Playwright trace 의 요청 헤더에는 Sec-Fetch-Dest 가 빠져 있다(2차 r2_tok 실측). 그래서 HTML 응답은
+    페이지 이동 요청에만 붙는 Upgrade-Insecure-Requests 가 없으면 비동기로 본다 (fetch 로 받은 HTML 조각).
+    """
+    names = set()
+    for h in (req or {}).get("headers") or []:
+        if not isinstance(h, dict):
+            continue
+        name, value = str(h.get("name", "")).lower(), str(h.get("value", "")).strip().lower()
+        names.add(name)
+        if name == "x-requested-with" or (name == "sec-fetch-dest" and value == "empty"):
+            return True
+    return "html" in mime and "upgrade-insecure-requests" not in names
 
 
 def strip_trace(src):
     """동작 기록(trace zip)에서 쿠키 · 인증값을 지운 사본을 만든다. 개발팀이 요청할 때만 쓴다.
 
     지우는 것: 쿠키 · 저장된 로그인 상태, 이름에 auth · token · session · csrf 등이 든 헤더 값,
-    주소의 쿼리 값, xhr · fetch 요청 · 응답 본문.
+    주소의 쿼리 값(fragment 포함, 로그 문장 · 헤더 안 주소까지), 요청 본문, JSON · XML · 비동기 응답 본문.
     남는 것: 화면 스냅샷(HTML) 안의 입력값 · 숨은 토큰, 화면에 보이는 운영 데이터.
     """
     import zipfile
     src = Path(src)
-
-    def mask(s):
-        return _QUERY_VALUE.sub(r"\1***", s) if "?" in s else s
 
     def clean(o):
         if isinstance(o, dict):
@@ -1984,13 +2031,16 @@ def strip_trace(src):
             for k in list(o):
                 if k in ("cookies", "storageState") and isinstance(o[k], (list, dict)):
                     o[k] = [] if isinstance(o[k], list) else {}
+                elif k == "queryString" and isinstance(o[k], list):
+                    # 요청의 쿼리 목록. 이름(sid · ticket 등)으로 가리지 않고 값은 전부 지운다
+                    o[k] = [dict(q, value="***") if isinstance(q, dict) and "value" in q else q for q in o[k]]
                 else:
                     o[k] = clean(o[k])
             return o
         if isinstance(o, list):
             return [clean(v) for v in o]
-        if isinstance(o, str) and o.startswith(("http://", "https://")):
-            return mask(o)
+        if isinstance(o, str) and "://" in o:
+            return _URL_IN_TEXT.sub(lambda m: _mask_trace_url(m.group(0)), o)
         return o
 
     def body_refs(o, out):
@@ -2011,8 +2061,8 @@ def strip_trace(src):
                     pd[k] = "(삭제)"
         content = (snap.get("response") or {}).get("content") or {}
         mime = str(content.get("mimeType", "")).lower()
-        api = snap.get("_resourceType") in ("xhr", "fetch") or any(
-            m in mime for m in ("json", "xml", "text/plain", "form"))
+        # JSON · XML 류 응답, 그리고 비동기 요청의 응답(jQuery .load() 처럼 HTML 조각을 돌려주는 것 포함)
+        api = _async_request(req, mime) or any(m in mime for m in ("json", "xml", "text/plain", "form"))
         if api and isinstance(content, dict):
             if content.get("_sha1"):
                 out.add(content["_sha1"])
@@ -2040,7 +2090,8 @@ def strip_trace(src):
                     continue
                 zo.writestr(info, texts.get(info.filename) or zi.read(info.filename))
     print("[*] 쿠키 · 인증값을 지운 사본: {}".format(dst))
-    print("    지운 것: 쿠키 · 로그인 상태, 인증 · 토큰 · 세션 헤더 값, 주소의 쿼리 값, API 요청 · 응답 본문")
+    print("    지운 것: 쿠키 · 로그인 상태, 인증 · 토큰 · 세션 헤더 값, 주소의 쿼리 값(fragment 포함), "
+          "요청 본문, JSON · XML · 비동기 응답 본문")
     print("    남는 것: 화면 스냅샷 안의 입력값 · 숨은 토큰, 화면에 보이는 운영 데이터.")
     print("    넘기기 전에 QA 계정에서 로그아웃해 세션을 끊어 두세요.")
     return 0
@@ -2066,7 +2117,8 @@ rem Old runners lack safety fixes. Stop unless RUNNER_VERSION is at least {need}
 set "RVER=0"
 for /f "tokens=3" %%V in ('findstr /b /c:"RUNNER_VERSION = " "!RUNNER!"') do set "RVER=%%V"
 if !RVER! LSS {need} (
-    echo   qa-test 플러그인 업데이트가 필요합니다. Claude Code 에서 업데이트한 뒤 다시 실행하세요.
+    echo   qa-test 플러그인 업데이트가 필요합니다.
+    echo   Claude Code 에 "qa-test 플러그인 업데이트해줘" 라고 요청한 뒤 다시 실행하세요. 모르면 이 화면을 담당 기획자에게 보내 주세요.
     echo   [설치된 러너 버전 !RVER! / 필요 버전 {need}]
     echo.
     pause
@@ -2075,6 +2127,12 @@ if !RVER! LSS {need} (
 rem Use the py launcher, or the default per-user Python when py is missing.
 set "PY=py"
 py -c "" >nul 2>&1 || set "PY=%LOCALAPPDATA%\Python\bin\python.exe"
+if not "!PY!"=="py" if not exist "!PY!" (
+    echo   Python 을 찾지 못했습니다. 이 화면을 담당 기획자에게 보내 주세요.
+    echo.
+    pause
+    exit /b 1
+)
 """
 
 BAT_TEMPLATE = """@echo off
@@ -2229,13 +2287,6 @@ LOGIN_STATE_JS = """(done) => {
 }"""
 
 
-def _site(host):
-    """같은 사이트 판정용. admin.bluepharmkorea.co.kr 과 bluepharmkorea.co.kr 을 같은 곳으로 본다."""
-    labels = (host or "").lower().split(".")
-    n = 3 if len(labels) >= 3 and labels[-2] in ("co", "or", "go", "ne", "ac", "re", "pe") else 2
-    return ".".join(labels[-n:])
-
-
 def _host(url):
     from urllib.parse import urlparse
     try:
@@ -2320,9 +2371,10 @@ def do_login(urls, ws, done_text=None):
                     snap = _snapshot(ctx)
                 except Exception:
                     break
-                site = _site(_host(urls[idx]))
+                # 같은 사이트 판정은 안전망과 같은 함수 (IP 주소는 주소 전체로 비교)
+                site = site_of(_host(urls[idx]))
                 hit = next((pg for pg in pages
-                            if _site(_host(pg.url)) == site and _logged_in(pg, done_text)), None)
+                            if site_of(_host(pg.url)) == site and _logged_in(pg, done_text)), None)
                 streak = streak + 1 if hit else 0
                 if streak >= 2:                             # 두 번 연속이어야 확정 (중간 화면 오판 방지)
                     print("[*] 로그인 확인: {}".format(_host(urls[idx])))
@@ -2783,6 +2835,9 @@ def main():
                 if (r["status"] in BAD and not args.no_retry and not r["writes"]
                         and timeout_hits.get(sel, 0) < 2):
                     first = dict(r, shots=keep_try1(r))
+                    # 1차가 window.close() 로 페이지를 닫았거나 팝업을 열어 두었으면 그대로 쓰지 않는다
+                    runner.use_page(page_for(name), sessions[name].get("login_check"))
+                    close_others(runner.page)
                     r = merge_retry(first, run_case(runner, case, blocklist, args.dry_run))
             finally:
                 if trace:
@@ -2813,7 +2868,8 @@ def main():
                     e.result["session"] = sessions[case.get("session", "")].get("label") or case.get("session", "")
                     results.append(e.result)
                     aborted = {"at": n, "total": len(cases), "case": case["id"], "msg": str(e),
-                               "why": "session"}
+                               "why": "session", "recent_blocked": list(runner.recent_blocked),
+                               "note": runner.session_note()}
                     lbl = e.result["session"]
                     print("\n[!] 실행 중단 - {}{}".format("[{}] ".format(lbl) if lbl else "", e))
                     break
@@ -2909,6 +2965,8 @@ def main():
             print("[!] 세션 만료로 {}번째 케이스에서 멈췄습니다. 그때까지 결과로 리포트를 만들었습니다.".format(
                 aborted["at"]))
             print("    login_qa.bat (또는 py qa_run.py --login <URL> --ws <작업폴더>) 로 로그인한 뒤 다시 실행하세요.")
+            if aborted.get("note"):
+                print("    " + aborted["note"])
         else:
             print("[!] {}번째 케이스에서 실행이 멈췄습니다 ({}). 그때까지 결과로 리포트를 만들었습니다.".format(
                 aborted["at"], aborted["msg"][:120]))

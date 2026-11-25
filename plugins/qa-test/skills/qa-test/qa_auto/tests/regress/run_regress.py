@@ -101,6 +101,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"ok": True})
         if path in ("/api/search", "/api/search2", "/api/goods/search"):
             return self._json({"n": 3})
+        if path == "/api/auth/refresh":
+            # 로그인 유지 POST. 안전망이 막으므로 여기 오면 안 된다
+            WRITES.append("POST refresh")
+            return self._json({"ok": True})
         if path in ("/api/log", "/api/log2"):
             # 로그성 POST. ignore_requests 여도 막기는 하므로 여기 오면 안 된다
             WRITES.append("POST " + path[5:])
@@ -233,10 +237,11 @@ def sc_approved():
 def sc_allowpost():
     code, f, meta, res, out, w = run("allowpost_off", "--dry-run")
     expect_status("allow_post 없음: POST 조회 차단", res, {"A1": "ERROR"})
-    # A1 은 write:false 로 둔 조회 버튼이라 write:false 전용 사유가 난다. 설정 키(meta.allow_post)는 권하지 않는다
-    check("allow_post 없음: 사유가 write:false 전용 · 'meta.allow_post' 없음",
-          has_reason(res, "A1", qa_run.REASON_WRITE_FALSE_SENT) and "meta.allow_post" not in reason_of(res, "A1"),
-          reason_of(res, "A1"))
+    # A1 은 write:false 로 둔 조회 버튼이라 write:false 전용 사유가 난다. 사유는 조회 · 검증 누락 둘 다 열어 두고
+    # 설정 키(allow_post)는 적지 않는다 (분류는 SKILL 2단계 절차)
+    check("allow_post 없음: 사유가 write:false 전용 · '조회 요청인지' · 'allow_post' 없음",
+          has_reason(res, "A1", qa_run.REASON_WRITE_FALSE_SENT) and "조회 요청인지" in reason_of(res, "A1")
+          and "allow_post" not in reason_of(res, "A1"), reason_of(res, "A1"))
     code, f, meta, res, out, w = run("allowpost_on", "--dry-run")
     expect_status("allow_post 있음: POST 조회 통과", res, {"A2": "PASS"})
     code, f, meta, res, out, w = run("ap_method", "--dry-run", "--no-retry")
@@ -392,9 +397,9 @@ def sc_wfalse():
     code, f, meta, res, out, w = run("wfalse", "--dry-run", "--no-retry")
     ran = expect_status("wfalse: write:false 빈 폼 제출이 쓰기 요청을 보내면 점검 필요", res, {"WF1": "ERROR"})
     rs = reason_of(res, "WF1")
-    check("wfalse: 사유에 'write:false' · 'meta.allow_post' 없음",
-          has_reason(res, "WF1", qa_run.REASON_WRITE_FALSE_SENT) and "write:false" in rs and "meta.allow_post" not in rs,
-          rs)
+    check("wfalse: 사유에 'write:false' · '입력 검증 누락' · 'allow_post' 없음",
+          has_reason(res, "WF1", qa_run.REASON_WRITE_FALSE_SENT) and "write:false" in rs and "입력 검증 누락" in rs
+          and "allow_post" not in rs, rs)
     check("wfalse: 사유의 주소는 경로부터 (검수 주소 앞부분 뺌)", "POST /api/write?what=apply" in rs, rs)
     no_writes("wfalse: 서버 쓰기 0", ran, w)
     rep = text(f, "리포트.html") + text(f, "개발전달.md") + text(f, "웍스등록.txt")
@@ -503,6 +508,45 @@ def sc_sess():
 
 
 @scenario
+def sc_sessblk():
+    """앞 케이스에서 막은 로그인 유지 POST → 다음 케이스 로그인 화면 → 중단 사유 · 알림 · 콘솔에 그 경로 (R3-14)."""
+    code, f, meta, res, out, w = run("sessblk", "--no-retry")
+    path = "POST /api/auth/refresh"
+    check("sessblk: 종료 코드 3 · SB1 은 막은 요청으로 점검 필요", code == 3 and statuses(res) == {
+        "SB1": "ERROR", "SB2": "ERROR"}, "{} / {}".format(code, statuses(res)))
+    rs = reason_of(res, "SB2")
+    check("sessblk: 중단 사유에 직전에 막은 요청 경로 · 다시 로그인해도 같은 결과",
+          has_reason(res, "SB2", qa_run.REASON_SESSION) and path in rs
+          and has_reason(res, "SB2", qa_run.REASON_SESSION_BLOCKED), rs)
+    info = meta.get("aborted_info") or {}
+    check("sessblk: aborted_info 에 최근 막은 요청", info.get("recent_blocked") == [path], str(info))
+    rep = text(f, "리포트.html")
+    alert = rep.split('<div class="alert">', 1)[-1].split("</div>", 1)[0] if '<div class="alert">' in rep else ""
+    check("sessblk: 리포트 중단 알림에 그 경로 · 안내", path in alert and "다시 로그인해도 같은 결과가 납니다" in alert,
+          alert[:300])
+    check("sessblk: 콘솔(bat 화면) 끝 안내에 그 경로", qa_run.REASON_SESSION_BLOCKED.format(path) in out, out[-400:])
+    no_writes("sessblk: 서버 쓰기 0 (갱신 POST 도 막힘)", bool(res), w)
+
+
+@scenario
+def sc_retrypop():
+    """재실행 전에 1차가 연 팝업을 닫고 지금 페이지를 다시 고른다 (R3-22, D-04).
+
+    1차가 연 팝업은 부모 창이 바뀌면(재실행 시작) POST 를 보낸다. 남아 있으면 재실행 판정이 '다른 창 요청 차단'
+    으로 판정 불가가 된다. 닫으면 1차 · 재실행 모두 실패(결함)로 남는다.
+    (러너 페이지에서 부른 window.close() 는 Chromium 이 무시한다. 스크립트가 연 창이 아니고 이동 기록이 2개 이상)
+    """
+    code, f, meta, res, out, w = run("retrypop", "--dry-run")
+    r = res.get("WC1", {})
+    check("retrypop: 1차 실패 · 재실행 실패 = 실패 (남은 팝업이 재실행을 흐리지 않음)",
+          r.get("status") == "FAIL" and r.get("retried") and (r.get("try1") or {}).get("status") == "FAIL",
+          "{} / {} / 1차 {}".format(r.get("status"), r.get("reason"), r.get("try1")))
+    check("retrypop: 재실행 사유에 '다른 창 요청 차단' 없음", qa_run.INTERFERE_POPUP not in r.get("reason", ""),
+          r.get("reason", ""))
+    no_writes("retrypop: 서버 쓰기 0", bool(res), w)
+
+
+@scenario
 def sc_probe():
     code, f, meta, res, out, w = run("probe", "--dry-run")
     expect_status("probe: 선언 없는 쓰기 · 오타 부재 판정 · 화면 글자", res,
@@ -607,11 +651,38 @@ def sc_bat():
     check("bat: 현재 버전이면 통과", new == (0, True), str(new))
     check("bat: 종료 코드 3 에서만 로그인 안내", '"%RESULT%"=="3"' in qa_run.BAT_TEMPLATE
           and '"%RESULT%"=="2"' not in qa_run.BAT_TEMPLATE)
+    check("bat: 업데이트 안내는 Claude 에 요청 · 담당 기획자 문구 (R3-25)",
+          'Claude Code 에 "qa-test 플러그인 업데이트해줘" 라고 요청한 뒤 다시 실행하세요. '
+          '모르면 이 화면을 담당 기획자에게 보내 주세요.' in qa_run.BAT_TEMPLATE)
+
+    # Python 찾기 블록 (R3-25): py 가 PATH 에 없고 대체 경로(LOCALAPPDATA)에도 없으면 안내하고 종료 코드 1
+    pyblock = "rem Use the py launcher" + qa_run.FIND_RUNNER.split("rem Use the py launcher", 1)[1]
+    pyblock = pyblock.replace("{{", "{").replace("}}", "}")
+    bat = WORK["tmp"] / "py_find.bat"
+    bat.write_text("@echo off\r\nsetlocal enabledelayedexpansion\r\n{}\r\necho PY_OK !PY!\r\n".format(
+        pyblock.replace("\n", "\r\n")), encoding="cp949", errors="replace")
+    import os
+    empty = WORK["tmp"] / "fake_localappdata"
+    empty.mkdir(exist_ok=True)
+    sysdir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    env = dict(os.environ, PATH=sysdir, LOCALAPPDATA=str(empty))
+    # 새 콘솔(창 없음)로 띄워 bat 을 더블클릭했을 때와 같은 기본 코드 페이지(cp949)로 출력을 받는다
+    nowin = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    p = subprocess.run(["cmd", "/c", str(bat)], capture_output=True, stdin=subprocess.DEVNULL, env=env,
+                       creationflags=nowin)
+    msg = p.stdout.decode("cp949", errors="replace")
+    check("bat: py 없음 + 대체 경로 없음 = 종료 코드 1 · 안내 문구",
+          p.returncode == 1 and "Python 을 찾지 못했습니다. 이 화면을 담당 기획자에게 보내 주세요." in msg
+          and "PY_OK" not in msg, "{} / {}".format(p.returncode, msg.strip()[:200]))
+    p = subprocess.run(["cmd", "/c", str(bat)], capture_output=True, stdin=subprocess.DEVNULL, creationflags=nowin)
+    msg = p.stdout.decode("cp949", errors="replace")
+    check("bat: 이 PC 환경에서는 Python 찾기 통과 (대조군)", p.returncode == 0 and "PY_OK" in msg,
+          "{} / {}".format(p.returncode, msg.strip()[:200]))
 
 
 ORDER = ["dry", "live", "block", "approved", "allowpost", "confirm", "getw", "late", "lateok", "popup",
          "race", "absence", "dlg", "allerr", "popsel", "boundary", "bypass", "wfalse", "ignore", "blres", "explore",
-         "trace", "gate", "sess", "probe", "flaky", "trend", "shared", "smoke", "bat"]
+         "trace", "gate", "sess", "sessblk", "retrypop", "probe", "flaky", "trend", "shared", "smoke", "bat"]
 
 
 def main():

@@ -392,6 +392,22 @@ SPECS["dry"]["cases"].append(
     case("S13", "없는 셀렉터 + 케이스 anchor body",
          [G(), {"action": "expect_visible", "selector": "#typo-not-exist", "timeout": 1500}], anchor="body"))
 
+# -- 4차 묶음 3: 데이터 · 경계 · 안내 --------------------------------
+B3 = "b3.html"
+
+# 앞 케이스에서 막은 로그인 유지 POST 때문에 다음 케이스가 로그인 화면 → 중단 사유에 그 경로 (R3-14)
+SPECS["sessblk"] = {"meta": meta("rg_sessblk", login_check={"body_contains": "로그인이 필요합니다"}), "cases": [
+    case("SB1", "열리자마자 토큰 갱신 POST", [G(B3 + "?refresh=1"), {"action": "wait", "ms": 800}]),
+    case("SB2", "다음 화면이 로그인 화면", [G("login.html"), {"action": "expect_visible", "selector": "body"}]),
+]}
+
+# 재실행은 1차가 연 팝업을 닫고 시작한다 (R3-22, D-04). 남은 팝업이 재실행 도중 POST 하면 판정 불가가 된다
+SPECS["retrypop"] = {"meta": meta("rg_retrypop"), "cases": [
+    case("WC1", "처음 열 때만 팝업을 여는 화면의 제목",
+         [G(B3), {"action": "click", "selector": "#pop3", "write": False}, {"action": "wait", "ms": 1500},
+          {"action": "expect_text", "selector": "#title", "equals": "없는 제목", "timeout": 1000}]),
+]}
+
 # 같은 project 의 다른 스펙이 비교 기준을 가로채지 않음 (개발자 D-N6)
 SPECS["m1"] = {"meta": meta("rg_shared"), "cases": [
     case("M1", "M1", [G(BP), {"action": "expect_text", "selector": "#title", "contains": "없는문구", "settle": 300}]),

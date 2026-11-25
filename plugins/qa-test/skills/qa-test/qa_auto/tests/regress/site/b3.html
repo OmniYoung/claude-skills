@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>묶음 3</title></head>
+<body>
+<h1 id="title">묶음 3</h1>
+<div id="v">-</div>
+<button id="pop3" onclick="openOnce()">미리보기</button>
+<script>
+// ?refresh=1: 열리자마자 로그인 유지(토큰 갱신) POST. 안전망이 막으면 실제 사이트는 스스로 로그아웃한다 (R3-14)
+if (location.search.indexOf('refresh=1') >= 0) {
+  fetch('/api/auth/refresh', {method: 'POST'})
+    .then(function () { document.getElementById('v').textContent = 'refreshed'; })
+    .catch(function () { document.getElementById('v').textContent = 'logged-out'; });
+}
+// 이 브라우저(세션)에서 처음 열었을 때만 '미리보기' 가 팝업을 연다 (재실행 전 팝업 정리, R3-22)
+var n = +(localStorage.getItem('pc') || 0);
+localStorage.setItem('pc', n + 1);
+function openOnce() {
+  if (n === 0) { window.open('/b3pop.html', 'b3pop'); }
+}
+</script>
+</body></html>

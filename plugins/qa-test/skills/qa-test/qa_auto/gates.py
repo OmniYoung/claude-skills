@@ -34,6 +34,7 @@ SCAN_FIELDS = ("selector", "label", "value", "text", "url", "js")
 # blocklist 의 주소 패턴(url_block_hit)과 GET 쓰기 의심 신호(get_write_suspect)로 보완한다.
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
+# 내장 blocklist: 발송·결제·발주·일괄삭제(띄어쓴 '일괄 삭제' 포함).
 # 승인된 운영 쓰기 케이스 실행 중에는 스펙 blocklist 와 별도로 이 버튼 글자를 항상 막는다.
 # 승인 케이스에서는 쓰기 힌트와 네트워크 안전망이 꺼지므로 마지막 보호다.
 # 정말 눌러야 하는 스펙만 meta.blocklist_off 에 항목을 그대로 적어 푼다.

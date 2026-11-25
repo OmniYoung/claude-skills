@@ -69,6 +69,17 @@ t("fix 없으면 영역 오류: 실제 현상", report._fix_line(r, with_id=True
 t("개발 탭은 [치명] 없이", report._fix_line(r, sev_prefix=False), "목록 오류: b (SB: SB-01)")
 t("주소의 토큰 가림", report._mask_url("https://a/x?sid=abc&page=2&access_token=zz"),
   "https://a/x?sid=***&page=2&access_token=***")
+# 이름 전체가 같을 때만 가림. 재현에 쓰는 상품코드 · 검색어는 남기고 fragment 토큰은 가림 (R3-27)
+t("주소 가림: 상품코드 · 검색어는 남김", report._mask_url("https://a/goods?goods_code=12345&keyword=타이레놀"),
+  "https://a/goods?goods_code=12345&keyword=타이레놀")
+t("주소 가림: fragment 의 access_token", report._mask_url("https://a/cb#access_token=x&state=1"),
+  "https://a/cb#access_token=***&state=1")
+t("주소 가림: ?sid=", report._mask_url("https://a/x?sid=x"), "https://a/x?sid=***")
+t("주소 가림: 대소문자 · api_key · refresh_token",
+  report._mask_url("https://a/x?API_KEY=k&mode=2&refresh_token=r"), "https://a/x?API_KEY=***&mode=2&refresh_token=***")
+t("주소 가림: 경로의 ;jsessionid", report._mask_url("https://a/x.do;jsessionid=ab"), "https://a/x.do;jsessionid=***")
+t("주소 가림: 단건 조회 code 는 남김", report._mask_url("https://a/x?code=12345&page=2"),
+  "https://a/x?code=12345&page=2")
 
 
 # -- 판정 변환 (final_status) 현행 동작 표 ----------------------
@@ -275,6 +286,55 @@ try:
 except qa_run.SessionAbort as e:
     t("run_case: 세션 만료는 전체 중단", (e.result["status"], e.result["reason"], e.result.get("aborted")),
       ("ERROR", "세션 만료로 중단 - 만료", True))
+
+
+# 세션 만료 안내에 실행 중 최근 막은 요청 (R3-14, A-07)
+class StubRoute:
+    def abort(self, *a):
+        pass
+
+
+class LoginPage(StubPage):
+    url = "http://fake.local/login"
+
+    def inner_text(self, sel):
+        return "로그인이 필요합니다"
+
+
+fr = FakeRunner()
+fr._block(StubRoute(), "POST", "http://fake.local/api/auth/refresh", "")
+run_fake([GOTO, {"action": "expect_visible", "selector": "#a"}], runner=fr)      # 다음 케이스 시작
+t("recent_blocked: 케이스 시작 때 비우지 않음 · 경로부터", fr.recent_blocked, ["POST /api/auth/refresh"])
+for p in ("/a", "/b", "/c", "/a"):
+    fr._block(StubRoute(), "POST", "http://fake.local" + p, "")
+t("recent_blocked: 최근 3줄 · 같은 줄은 뒤로", fr.recent_blocked, ["POST /b", "POST /c", "POST /a"])
+fr.recent_blocked = ["POST /api/auth/refresh"]
+fr.page, fr.login_check = LoginPage(), {"body_contains": "로그인이 필요합니다"}
+try:
+    fr._check_session()
+    t("세션 만료 사유에 직전에 막은 요청", "만료 안 됨", "SessionExpired")
+except qa_run.SessionExpired as e:
+    s, reason = FS(e, [], set(), [], [])
+    t("세션 만료 사유에 직전에 막은 요청",
+      (s, "직전에 막은 요청: POST /api/auth/refresh - 로그인 유지 요청이면 다시 로그인해도 같은 결과가 납니다." in reason,
+       qa_run.REASON_SESSION_BLOCKED.format("POST /api/auth/refresh") in reason), ("ERROR", True, True))
+fr2 = FakeRunner()
+fr2.page, fr2.login_check = LoginPage(), {"body_contains": "로그인이 필요합니다"}
+try:
+    fr2._check_session()
+except qa_run.SessionExpired as e:
+    t("막은 요청이 없으면 세션 만료 사유 그대로", "직전에 막은 요청" in str(e), False)
+t("분석 · 로그 요청(ignore)은 recent_blocked 에 안 넣음", (lambda r: (
+    r._block(StubRoute(), "POST", "https://www.google-analytics.com/g/collect", ""), r.recent_blocked)[1])(
+    FakeRunner()), [])
+info = {"at": 2, "total": 2, "case": "K2", "why": "session", "note": fr.session_note()}
+t("리포트 중단 알림에 막은 요청 경로", "POST /api/auth/refresh" in report._aborted_html({"aborted_info": info}, []),
+  True)
+t("write:false 전용 사유에 설정 키 없음 (조회 · 검증 누락 둘 다 열어 둠)",
+  ("allow_post" in qa_run.REASON_WRITE_FALSE_SENT, "조회 요청인지" in qa_run.REASON_WRITE_FALSE_SENT),
+  (False, True))
+t("로그인 창 같은 사이트 판정은 gates.site_of 하나 (옛 _site 없음)", hasattr(qa_run, "_site"), False)
+
 # 게이트
 r = qa_run.run_case(FakeRunner(), {"id": "K", "title": "t", "steps": [{"action": "click", "selector": "text=발송"}]},
                     ["text=발송"], True)
@@ -453,17 +513,40 @@ try:
     make_run(root, 11)
     removed = qa_run.prune_outputs(root, "p", keep=2, protect=set())
     left = sorted(p.name[-2:] for p in root.iterdir())
-    t("정리: 지울 수 있는 3개만 지움", sorted(x[-2:] for x in removed), ["05", "06", "08"])
-    t("정리: 보존 대상은 남음", left, ["01", "02", "03", "04", "07", "09", "10", "11"])
+    # 02 의 downloads 삭제도 3개 제한에 같이 센다 (R3-26): downloads 1 + 실행 폴더 2 = 3. 08 은 다음 실행 때
+    t("정리: downloads 포함 3개만 지움", sorted(x[-2:] for x in removed), ["05", "06"])
+    t("정리: 보존 대상은 남음", left, ["01", "02", "03", "04", "07", "08", "09", "10", "11"])
     t("정리: 개발 전달 근거는 trace 를 남기고 내려받은 파일만 지움",
       ((d2 / "traces").exists(), (d2 / "downloads").exists()), (True, False))
     t("정리: 이름 바꾼 임시 폴더가 남지 않음", any(p.name.startswith("_trash_") for p in root.iterdir()), False)
+    removed = qa_run.prune_outputs(root, "p", keep=2, protect=set())
+    t("정리: 다음 실행 때 남은 08 을 지움 (downloads 는 이미 없음)", [x[-2:] for x in removed], ["08"])
 
     root2 = tmp / "out2"
     root2.mkdir()
     for i in range(1, 8):
         make_run(root2, i)
     t("정리: 한 번에 최대 3개", len(qa_run.prune_outputs(root2, "p", keep=2, protect=set())), 3)
+
+    # n_dev 실행 5개(downloads 있음) + 지울 실행 2개: 한 번에 지우는 폴더 합계 3개 이하 (R3-26)
+    root3 = tmp / "out3"
+    root3.mkdir()
+    devs = [make_run(root3, i, meta={"n_dev": 1}, dirs=("downloads",)) for i in range(1, 6)]
+    make_run(root3, 6)
+    make_run(root3, 7)
+    for i in range(8, 10):
+        make_run(root3, i)
+    removed = qa_run.prune_outputs(root3, "p", keep=2, protect=set())
+    dl_gone = sum(1 for d in devs if not (d / "downloads").exists())
+    t("정리: n_dev downloads + 실행 폴더 합계 3개 이하", (dl_gone + len(removed) <= 3, dl_gone, len(removed)),
+      (True, 3, 0))
+    while True:
+        more = qa_run.prune_outputs(root3, "p", keep=2, protect=set())
+        if not more:
+            break
+        removed += more
+    t("정리: 여러 번에 나눠 결국 다 지움 (downloads 5 · 실행 06 · 07)",
+      (sum(1 for d in devs if not (d / "downloads").exists()), [x[-2:] for x in removed]), (5, ["06", "07"]))
 
     # -- trace 사본 --
     src = tmp / "T1.zip"
@@ -473,18 +556,47 @@ try:
                 "cookies": [{"name": "PHPSESSID", "value": "SECRET_COOKIE"}],
                 "origins": [{"localStorage": [{"name": "access_token", "value": "SECRET_LS"}]}]}}},
             {"type": "before", "params": {"url": "https://a.co.kr/x?sid=SECRET_URL_SID"}},
+            # 실제 trace 모양 (3차 리뷰 D-01): 로그 문장 속 주소, fragment 토큰
+            {"type": "log", "callId": "call@1",
+             "message": "navigating to \"https://a.co.kr/x?sid=SECRET_LOG_SID\", waiting until \"load\""},
+            {"type": "before", "params": {"url": "https://a.co.kr/cb#access_token=SECRET_FRAG&state=1"}},
             {"type": "frame-snapshot", "snapshot": {"html": ["META", {"name": "csrf-token",
                                                                        "content": "SECRET_DOM_META"}]}},
         ]))
-        z.writestr("trace.network", json.dumps({"type": "resource-snapshot", "snapshot": {
-            "request": {"url": "https://a.co.kr/api/me?access_token=SECRET_URL_QUERY",
-                        "headers": [{"name": "X-Auth-Token", "value": "SECRET_CUSTOM_HEADER"},
-                                    {"name": "Cookie", "value": "SECRET_COOKIE2"}],
-                        "postData": {"_sha1": "req1.dat", "text": "pw=SECRET_PW"}},
-            "response": {"headers": [{"name": "Set-Cookie", "value": "SECRET_SETCOOKIE"}],
-                         "content": {"mimeType": "application/json", "_sha1": "resp1.json"}}}}))
+
+        def net(req, mime, sha1):
+            return json.dumps({"type": "resource-snapshot", "snapshot": {
+                "request": req, "response": {"headers": [], "content": {"mimeType": mime, "_sha1": sha1}}}})
+        z.writestr("trace.network", "\n".join([
+            json.dumps({"type": "resource-snapshot", "snapshot": {
+                "request": {"url": "https://a.co.kr/api/me?access_token=SECRET_URL_QUERY",
+                            "headers": [{"name": "X-Auth-Token", "value": "SECRET_CUSTOM_HEADER"},
+                                        {"name": "Cookie", "value": "SECRET_COOKIE2"},
+                                        {"name": "Referer", "value": "https://a.co.kr/x?sid=SECRET_REFERER_SID"}],
+                            # 이름이 sid · ticket 이어도 값은 전부 지운다
+                            "queryString": [{"name": "sid", "value": "SECRET_QS_SID"},
+                                            {"name": "ticket", "value": "SECRET_QS_TICKET"}],
+                            "postData": {"_sha1": "req1.dat", "text": "pw=SECRET_PW"}},
+                "response": {"headers": [{"name": "Set-Cookie", "value": "SECRET_SETCOOKIE"}],
+                             "content": {"mimeType": "application/json", "_sha1": "resp1.json"}}}}),
+            # HTML 조각을 돌려주는 비동기 요청 (jQuery .load · fetch). 요청 종류 키는 trace 에 없다
+            net({"url": "https://a.co.kr/list.php", "headers": [{"name": "X-Requested-With",
+                                                               "value": "XMLHttpRequest"}]}, "text/html", "xhr1.html"),
+            net({"url": "https://a.co.kr/part.php", "headers": [{"name": "sec-fetch-dest", "value": "empty"}]},
+                "text/html", "fetch1.html"),
+            # 실제 trace 의 fetch 요청 헤더 모양 (Sec-Fetch-* 없음, Upgrade-Insecure-Requests 없음)
+            net({"url": "https://a.co.kr/frag.php", "headers": [{"name": "Accept", "value": "*/*"}]},
+                "text/html; charset=utf-8", "fetch2.html"),
+            # 페이지 이동(문서) 요청의 HTML 은 남는다
+            net({"url": "https://a.co.kr/x", "headers": [{"name": "Upgrade-Insecure-Requests", "value": "1"}]},
+                "text/html", "doc1.html"),
+        ]))
         z.writestr("resources/resp1.json", "SECRET_RESP_BODY")
         z.writestr("resources/req1.dat", "SECRET_PW2")
+        z.writestr("resources/xhr1.html", "SECRET_XHR_HTML")
+        z.writestr("resources/fetch1.html", "SECRET_FETCH_HTML")
+        z.writestr("resources/fetch2.html", "SECRET_FETCH2_HTML")
+        z.writestr("resources/doc1.html", "DOC_HTML")
         z.writestr("resources/shot.jpeg", "IMG")
     qa_run.strip_trace(src)
     dst = src.with_name("T1_전달용.zip")
@@ -492,10 +604,16 @@ try:
         names = z.namelist()
         blob = b"".join(z.read(n) for n in names)
     gone = ["SECRET_COOKIE", "SECRET_LS", "SECRET_URL_SID", "SECRET_URL_QUERY", "SECRET_CUSTOM_HEADER",
-            "SECRET_COOKIE2", "SECRET_PW", "SECRET_SETCOOKIE", "SECRET_RESP_BODY", "SECRET_PW2"]
+            "SECRET_COOKIE2", "SECRET_PW", "SECRET_SETCOOKIE", "SECRET_RESP_BODY", "SECRET_PW2",
+            "SECRET_LOG_SID", "SECRET_FRAG", "SECRET_REFERER_SID", "SECRET_QS_SID", "SECRET_QS_TICKET",
+            "SECRET_XHR_HTML", "SECRET_FETCH_HTML", "SECRET_FETCH2_HTML"]
     t("trace 사본: 인증값 · 쿼리 · 본문 지움", [s for s in gone if s.encode() in blob], [])
     t("trace 사본: 화면 스냅샷(DOM)은 남음 (안내문에 명시)", b"SECRET_DOM_META" in blob, True)
-    t("trace 사본: 화면 캡처는 남음", "resources/shot.jpeg" in names, True)
+    t("trace 사본: 화면 캡처 · 문서 HTML 은 남음", ("resources/shot.jpeg" in names, "resources/doc1.html" in names),
+      (True, True))
+    t("trace 사본: 주소의 경로 · 쿼리 이름은 남음 (값만 가림)",
+      (b"navigating to \\\"https://a.co.kr/x?sid=***\\\"" in blob, b"#access_token=***&state=***" in blob,
+       b'"name": "ticket", "value": "***"' in blob), (True, True, True))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
