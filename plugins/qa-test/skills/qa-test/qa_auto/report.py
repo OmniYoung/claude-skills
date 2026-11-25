@@ -95,6 +95,44 @@ def _dev_items(results):
             if r["status"] == "FAIL" and KIND_META[_kind_of(r)][1]]
 
 
+# 판정하지 못한 상태. 결함이 없다고 확인한 건이 아니므로 "오류 없음" 에 섞지 않는다.
+# 불안정(재실행 통과) · 조건 미충족도 확인된 정상이 아니다. 승인 대기(SKIPPED)는 따로 센다
+UNJUDGED = ("ERROR", "FLAKY", "NA", "BLOCKED")
+
+
+def _counted(results):
+    """건수를 셀 대상. 잔여 데이터 점검(kind qa)은 검수 케이스가 아니라 뺀다."""
+    return [r for r in results if _kind_of(r) != "qa"]
+
+
+def _unjudged(results):
+    return [r for r in _counted(results) if r["status"] in UNJUDGED]
+
+
+def _judge_counts(results):
+    """(판정한 건수, 판정 못 한 건수, 승인 대기 건수, 판정 못 한 내역 문구)."""
+    rows = _counted(results)
+    unj = _unjudged(results)
+    skipped = sum(1 for r in rows if r["status"] == "SKIPPED")
+    parts = ["{} {}".format(STATUS_META[k][0], n) for k in UNJUDGED
+             for n in [sum(1 for r in unj if r["status"] == k)] if n]
+    return len(rows) - len(unj) - skipped, len(unj), skipped, " · ".join(parts)
+
+
+def _partial_text(spec, results):
+    return "일부 케이스만 실행 (전체 {}건 중 {}건)".format(len(spec.get("cases", [])), len(_counted(results)))
+
+
+def _unjudged_line(n_unjudged, n_dev):
+    """판정 못 한 건 안내. 확정 FAIL 이 있으면 그건 지금 넘기고 나머지는 추가로."""
+    return "판정하지 못한 {}건은 기획팀 확인 뒤 {} 전달합니다.".format(
+        n_unjudged, "추가로" if n_dev else "다시")
+
+
+def _skipped_line(n_skipped):
+    return "승인 대기 {}건은 실행하지 않았습니다.".format(n_skipped)
+
+
 def _area_groups(rows):
     """area 묶음 순서대로. area 가 없는 항목은 맨 뒤 '기타' 로 모은다.
 
@@ -243,12 +281,19 @@ def build_works_log(spec, results, out_dir, run_meta=None):
         path.write_text("\n".join(L), encoding="utf-8")
         return path
 
-    # "수정 요청" 으로 쓰면 신규 요청으로 읽혀 결함으로 처리되지 않는다. 기획대로 안 된 것은 오류로 쓴다
-    L = ["[{}] {} 검수 · 기획 미반영 오류 {}건".format(
-        datetime.now().strftime("%m/%d"), meta["project"], len(items))]
+    # "수정 요청" 으로 쓰면 신규 요청으로 읽혀 결함으로 처리되지 않는다. 기획대로 안 된 것은 오류로 쓴다.
+    # 판정 못 한 건 · 승인 대기가 있으면 "오류 없음" 이라고 쓰지 않는다. 기획자는 첫 두 줄만 보고 붙인다
+    judged, n_unj, n_skip, _ = _judge_counts(results)
+    head = "판정한 {}건 중 ".format(judged) if not items and (n_unj or n_skip) else ""
+    L = ["[{}] {} 검수 · {}기획 미반영 오류 {}건".format(
+        datetime.now().strftime("%m/%d"), meta["project"], head, len(items))]
     if (run_meta or {}).get("partial"):
-        L.append("(일부 케이스만 실행한 결과)")
-    if not items:
+        L.append(_partial_text(spec, results))
+    if n_unj:
+        L.append(_unjudged_line(n_unj, len(items)))
+    elif not items and n_skip:
+        L.append(_skipped_line(n_skip))
+    elif not items:
         L.append("")
         L.append("미반영 오류 없음.")
     n = 0
@@ -291,14 +336,30 @@ def build_dev_md(spec, results, out_dir, run_meta=None):
     L.append("- 대상: {}".format(meta["base_url"]))
     L.append("- 검수일: {}".format(datetime.now().strftime("%Y-%m-%d")))
     L.append("- 실행 환경: {}".format(_env_line(spec)))
-    L.append("- 전체 {}건 중 **미반영 오류 {}건**{}".format(
-        len(results), len(items), " (일부 케이스만 실행)" if (run_meta or {}).get("partial") else ""))
+    if (run_meta or {}).get("partial"):
+        L.append("- " + _partial_text(spec, results))
+    # 분모는 판정한 건만. 판정 못 한 건 · 승인 대기를 "전체" 에 넣으면 나머지가 다 통과한 것처럼 읽힌다
+    judged, n_unj, n_skip, unj_parts = _judge_counts(results)
+    summary = "- 판정 {}건 중 **미반영 오류 {}건**".format(judged, len(items))
+    if n_unj:
+        summary += " · 판정 못 함 {}건({})".format(n_unj, unj_parts)
+    if n_skip:
+        summary += " · 승인 대기 {}건".format(n_skip)
+    L.append(summary)
     L.append("")
 
     if not items:
         L.append("---")
         L.append("")
-        L.append("확정 기획서 기준으로 어긋난 항목은 없습니다.")
+        if n_unj:
+            L.append(_unjudged_line(n_unj, 0))
+        elif n_skip:
+            L.append(_skipped_line(n_skip))
+        else:
+            L.append("확정 기획서 기준으로 어긋난 항목은 없습니다.")
+        L.append("")
+    elif n_unj:
+        L.append(_unjudged_line(n_unj, len(items)))
         L.append("")
     for i, area, r in _flat_dev_items(results):
         L.append("---")
@@ -573,9 +634,20 @@ def _dev_block(spec, results, held, md_name, log_name, log_text, run_meta=None):
                 '않습니다. 다시 실행한 뒤 전달합니다.</p></div></div>').format(_esc(_held_text(run_meta, results)))
     rows_in = _flat_dev_items(results)
     if not rows_in:
-        # 넘길 게 없는데 복사 버튼을 남겨두면 읽는 사람이 헷갈린다
-        head = ('<div class="devhead"><div><b>전달할 내용 없음</b>'
-                '<p>확정 기획서 기준으로 어긋난 항목이 없습니다.</p></div></div>')
+        # 넘길 게 없는데 복사 버튼을 남겨두면 읽는 사람이 헷갈린다.
+        # "전달할 내용 없음" 은 판정 못 한 건 · 승인 대기가 없을 때만. 있으면 기획팀 확인이 먼저다
+        judged, n_unj, n_skip, unj_parts = _judge_counts(results)
+        if n_unj:
+            head = ('<div class="devhead"><div><b>전달 보류 · 판정 못 한 건 {}건</b>'
+                    '<p>기획팀 검토 탭에서 먼저 확인합니다 ({}).</p></div>'
+                    '<button type="button" onclick="tab(\'qa\')">기획팀 검토로</button></div>').format(
+                        n_unj, _esc(unj_parts))
+        elif n_skip:
+            head = ('<div class="devhead"><div><b>판정한 {}건 중 기획 미반영 오류 0건</b>'
+                    '<p>{}</p></div></div>').format(judged, _esc(_skipped_line(n_skip)))
+        else:
+            head = ('<div class="devhead"><div><b>전달할 내용 없음</b>'
+                    '<p>확정 기획서 기준으로 어긋난 항목이 없습니다.</p></div></div>')
         return head + (_held_note(held) if held else "")
     rows = []
     for i, area, r in rows_in:
@@ -1321,17 +1393,23 @@ def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None,
 
     path = out_dir / "리포트.html"
     path.write_text(doc, encoding="utf-8")
+    return path
 
-    # 원본 결과도 남긴다 (재검수 · 지난 실행 비교용). 실행 조건을 같이 적어야
-    # 부분 실행 · 중단된 실행이 비교 기준으로 잡히지 않는다. 쓰다 끊겨 깨진 파일이 남지 않게
-    # 임시 파일에 다 쓴 뒤 바꿔 끼운다.
+
+def write_results(out_dir, results, run_meta=None):
+    """원본 결과(results.json). 리포트보다 먼저 쓴다 (qa_run.main).
+
+    재검수 · 지난 실행 비교 · 정리(prune)가 이 파일을 본다. 리포트를 만들다 예외가 나도 결과와
+    운영 데이터 미정리(unclean) 기록이 남아야 한다. 실행 조건을 같이 적어야 부분 실행 · 중단된 실행이
+    비교 기준으로 잡히지 않는다. 쓰다 끊겨 깨진 파일이 남지 않게 임시 파일에 다 쓴 뒤 바꿔 끼운다.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
     clean = [{k: v for k, v in r.items() if k != "_seq"} for r in results]
     tmp = out_dir / "results.json.tmp"
     tmp.write_text(json.dumps({"meta": run_meta or {}, "results": clean}, ensure_ascii=False, indent=2),
                    encoding="utf-8")
     os.replace(str(tmp), str(out_dir / "results.json"))
-
-    return path
+    return out_dir / "results.json"
 
 
 def _total_text(run_meta, results):

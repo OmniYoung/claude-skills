@@ -92,14 +92,17 @@ FS_TABLE = [
      "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 문구 불일치"),
     ("둘 다 개입", qa_run.AssertFail("x"), {DLG, REQ}, [], ["POST /a"],
      "ERROR", "판정 불가 - 요청 차단 · 확인창 취소로 화면 흐름이 달라짐: x / 막은 요청: POST /a"),
-    # 확인창 관련 4조합의 현행 입력. 현행은 dismissed 를 보지 않는다
-    ("현행: 취소 → expect_dialog 통과(interfered 비움) → 판정 실패", qa_run.AssertFail("x"), set(), [], [],
-     "FAIL", "x"),
-    ("현행: expect_dialog 문구 불일치", qa_run.AssertFail("알럿 불일치"), set(), [], [], "FAIL", "알럿 불일치"),
-    ("현행: 판정 스텝 도중 취소(dismissed 만 남음) + 판정 실패", qa_run.AssertFail("x"), set(), ["삭제?"], [],
-     "FAIL", "x"),
-    ("현행: 확인창 뜬 뒤 expect_no_dialog 실패(interfered 켜짐)", qa_run.AssertFail("알럿이 뜸"), {DLG}, [], [],
-     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 알럿이 뜸"),
+    # 확인창 4조합 (R3-01). 취소 기록은 dismissed 에만 쌓이고, expect_dialog 가 통과하면 interfered 를 켠다
+    ("취소 → expect_dialog 통과(interfered 켜짐) → 판정 실패 = 점검 필요", qa_run.AssertFail("x"), {DLG}, [], [],
+     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: x"),
+    ("expect_dialog 문구 불일치(취소 기록 소비) = 실패", qa_run.AssertFail("알럿 불일치"), set(), [], [],
+     "FAIL", "알럿 불일치"),
+    ("판정 스텝 도중 취소(dismissed 만 남음) + 판정 실패 = 점검 필요", qa_run.AssertFail("x"), set(), ["삭제?"], [],
+     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: x"),
+    ("확인창 뜬 뒤 expect_no_dialog 실패(취소 기록 소비, 개입 없음) = 실패", qa_run.AssertFail("알럿이 뜸"),
+     set(), [], [], "FAIL", "알럿이 뜸"),
+    ("같은 세션 팝업 요청 차단 뒤 판정 실패 = 점검 필요", qa_run.AssertFail("x"), {qa_run.INTERFERE_POPUP}, [],
+     ["POST /p (다른 창)"], "ERROR", "판정 불가 - 다른 창 요청 차단로 화면 흐름이 달라짐: x / 막은 요청: POST /p (다른 창)"),
 ]
 for name, exc, itf, dis, blog, want_s, want_r in FS_TABLE:
     t("final_status: " + name, FS(exc, [], itf, dis, blog), (want_s, want_r))
@@ -119,8 +122,10 @@ t("merge_retry: 입력은 그대로", (first["status"], second["status"], second
 m = qa_run.merge_retry(res("FAIL", "a"), res("FAIL", "b"))
 t("merge_retry: 실패 → 실패", (m["status"], m["reason"], m.get("retried"), "flaky" in m), ("FAIL", "b", True, False))
 m = qa_run.merge_retry(res("FAIL", "a"), res("ERROR", "시간 초과"))
-t("merge_retry: 실패 → 점검 필요 (현행: 2차 사유만)", (m["status"], m["reason"], m.get("retried")),
-  ("ERROR", "시간 초과", True))
+t("merge_retry: 실패 → 점검 필요는 점검 필요 + 사유 앞 '1차 실패:'", (m["status"], m["reason"], m.get("retried")),
+  ("ERROR", "1차 실패: a / 재실행: 시간 초과", True))
+m = qa_run.merge_retry(res("ERROR", "a"), res("ERROR", "b"))
+t("merge_retry: 점검 필요 → 점검 필요는 2차 사유 그대로", (m["status"], m["reason"]), ("ERROR", "b"))
 m = qa_run.merge_retry(res("ERROR", "시간 초과"), res("PASS"))
 t("merge_retry: 점검 필요 → 통과는 통과 + 재실행 통과 표시", (m["status"], m["reason"], m.get("flaky")),
   ("PASS", "", "시간 초과"))
@@ -154,14 +159,45 @@ t("차단 안내: cleanup 없음", "정리(cleanup) 절차가 없습니다" in g
 
 
 # -- run_case 상태 전이 (브라우저 없이) ------------------------------
+class StubPage:
+    """expect_dialog · expect_no_dialog 의 실제 코드가 쓰는 만큼만."""
+    url = "http://fake.local/x"
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class StubDialog:
+    type = "confirm"
+    page = None
+
+    def __init__(self, message):
+        self.message = message
+
+    def dismiss(self):
+        pass
+
+    def accept(self):
+        pass
+
+
 class FakeRunner(qa_run.Runner):
     """스텝의 _raise 예외를 그대로 내는 러너. _block 이 있으면 그 스텝에서 요청을 막은 것으로 친다."""
 
     def __init__(self):
         super().__init__(None, {"meta": {"base_url": "http://fake.local"}}, Path("fake.json"),
                          Path("unused"), Path("unused"))
+        self.page = StubPage()
 
     def run(self, step, case_id, idx):
+        if step.get("action") in ("expect_dialog", "expect_no_dialog"):
+            return qa_run.Runner.run(self, step, case_id, idx)     # 실제 판정 코드 (StubPage 필요)
+        self.check_dismissed()          # 실제 run 처럼 앞 스텝의 취소 기록을 먼저 본다
+        if step.get("action") in qa_run.CLEARS_DIALOGS:
+            self.dialogs = []
+        if step.get("_dialog"):
+            # 이 스텝 도중 확인창이 떴다 (승인 안 된 스텝이면 취소된다)
+            self._on_dialog(StubDialog(step["_dialog"]))
         if step.get("_block"):
             self.blocked_log.append(step["_block"])
             self.interfered.add(qa_run.INTERFERE_REQUEST)
@@ -180,9 +216,9 @@ class FakeRunner(qa_run.Runner):
         return bool(step.get("_anchor_ok"))
 
 
-def run_fake(steps, dry_run=True, **case):
+def run_fake(steps, dry_run=True, runner=None, **case):
     c = dict({"id": "K", "title": "t", "steps": steps}, **case)
-    return qa_run.run_case(FakeRunner(), c, [], dry_run)
+    return qa_run.run_case(runner or FakeRunner(), c, [], dry_run)
 
 
 GOTO = {"action": "goto", "url": "/x"}
@@ -243,6 +279,132 @@ t("게이트: cleanup 없음", (r["status"], r.get("blocked_by")), ("BLOCKED", "
 r = run_fake([{"action": "fill", "selector": "#q", "value": "x"}], dry_run=False, writes=True, approved=True,
              cleanup=[GOTO])
 t("게이트: 승인 쓰기 첫 스텝 goto 아님", (r["status"], r.get("blocked_by")), ("BLOCKED", "first_goto"))
+
+# 확인창 취소 4조합 (R3-01): 실제 expect_dialog · expect_no_dialog 코드로
+LEAVE = "작성 중인 내용이 사라집니다. 이동할까요?"
+CLICK = {"action": "click", "selector": "#tolist", "write": False, "_dialog": LEAVE}
+r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "사라집니다"},
+              {"action": "expect_text", "selector": "#title", "equals": "목록", "_raise": qa_run.AssertFail("다름")}])
+t("확인창: 취소 → expect_dialog 통과 → 판정 실패 = 점검 필요",
+  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 다름"))
+r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "다른 문구", "timeout": 30}])
+t("확인창: expect_dialog 문구 불일치 = 실패", (r["status"], r["reason"].startswith("알럿 문구 불일치")), ("FAIL", True))
+r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "_dialog": "삭제?",
+                     "_raise": qa_run.AssertFail("다름")}])
+t("확인창: 판정 스텝 도중 취소 + 판정 실패 = 점검 필요",
+  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 다름"))
+r = run_fake([GOTO, dict(CLICK, _dialog="삭제?"), {"action": "expect_no_dialog", "ms": 0}])
+t("확인창: confirm 뜬 뒤 expect_no_dialog = 실패", (r["status"], r["reason"]), ("FAIL", "알럿이 뜨면 안 되는데 뜸: 삭제?"))
+r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "사라집니다"}])
+t("확인창: 문구만 확인하고 끝나면 통과", (r["status"], r["reason"]), ("PASS", ""))
+r = run_fake([GOTO, CLICK, {"action": "expect_text", "selector": "#a", "contains": "x"}])
+t("확인창: expect_dialog 없이 다음 스텝 = 점검 필요(취소 사유)",
+  (r["status"], r["reason"].startswith("확인창 '" + LEAVE)), ("ERROR", True))
+fr = FakeRunner()
+fr.dialogs = ["앞 케이스 알럿"]
+r = run_fake([{"action": "expect_no_dialog", "ms": 0}], runner=fr)
+t("확인창: 앞 케이스 알럿 기록은 케이스 시작 때 비움", (r["status"], r["reason"]), ("PASS", ""))
+
+# precondition 개입 (R3-01 · D-05): 안전망이 막았으면 조건 미충족이 아니라 점검 필요
+r = run_fake([GOTO, {"action": "expect_count", "selector": "tr", "min": 1, "precondition": True, "anchor": "#t",
+                     "_anchor_ok": True, "_block": "POST /api/list", "_raise": qa_run.AssertFail("0건")}])
+t("precondition: 요청 차단 뒤 어긋남 = 점검 필요 (조건 미충족 아님)",
+  (r["status"], r["reason"]),
+  ("ERROR", "조건 확인 불가 - 안전망 개입(요청 차단)으로 화면 흐름이 실제와 다름: 0건 / 막은 요청: POST /api/list"))
+r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "precondition": True, "anchor": "#b",
+                     "_anchor_ok": True, "_dialog": "이동?", "_raise": qa_run.AssertFail("없음")}])
+t("precondition: 확인창 취소 뒤 어긋남 = 점검 필요",
+  (r["status"], r["reason"].startswith("조건 확인 불가 - 안전망 개입(확인창 취소)")), ("ERROR", True))
+
+
+# -- 판정 못 한 건이 있을 때 전달 문구 (R3-03) -----------------------
+NO_DEFECT = ("미반영 오류 없음", "어긋난 항목은 없습니다", "어긋난 항목이 없습니다", "전달할 내용 없음")
+
+
+def rr(cid, status, **kw):
+    return dict({"id": cid, "title": cid, "status": status, "reason": "", "kind": "defect", "steps": [],
+                 "shots": [], "requirement": cid, "source": "SB-01", "area": "목록", "fix": cid + " 오류"}, **kw)
+
+
+def deliver(results, n_cases=None, partial=False):
+    """(웍스 줄 목록, md, 개발 탭 HTML)."""
+    spec = {"meta": {"project": "P", "base_url": "http://x"},
+            "cases": [{"id": "C{}".format(i)} for i in range(n_cases or len(results))]}
+    run_meta = {"partial": partial}
+    d = Path(tempfile.mkdtemp(prefix="qa_unit_rep_"))
+    try:
+        log = report.build_works_log(spec, results, d, run_meta).read_text(encoding="utf-8")
+        md = report.build_dev_md(spec, results, d, run_meta).read_text(encoding="utf-8")
+        dev = report._dev_block(spec, results, report._held_items(results), "개발전달.md", "웍스등록.txt", log,
+                                run_meta)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return log.splitlines(), md, dev
+
+
+def no_defect_words(*texts):
+    return [w for w in NO_DEFECT for x in texts if w in x]
+
+
+TODAY_MD = __import__("datetime").datetime.now().strftime("%m/%d")
+log, md, dev = deliver([rr("Z1", "ERROR"), rr("Z2", "ERROR"), rr("Z3", "ERROR")])
+t("전달 문구: 전부 점검 필요 - 웍스 첫 두 줄", log[:2],
+  ["[{}] P 검수 · 판정한 0건 중 기획 미반영 오류 0건".format(TODAY_MD), "판정하지 못한 3건은 기획팀 확인 뒤 다시 전달합니다."])
+t("전달 문구: 전부 점검 필요 - md 요약 줄", "- 판정 0건 중 **미반영 오류 0건** · 판정 못 함 3건(점검 필요 3)" in md, True)
+t("전달 문구: 전부 점검 필요 - 개발 탭 전달 보류 + 기획팀 검토로",
+  ("전달 보류 · 판정 못 한 건 3건" in dev, "기획팀 검토로" in dev, 'id="copybtn"' in dev), (True, True, False))
+t("전달 문구: 전부 점검 필요 - '오류 없음' 류 0", no_defect_words("\n".join(log), md, dev), [])
+
+log, md, dev = deliver([rr("F1", "FAIL"), rr("E1", "ERROR"), rr("E2", "BLOCKED")])
+t("전달 문구: 실패 1 + 판정 못 함 2 - 웍스 첫 줄 그대로 · 둘째 줄 추가 전달", log[:2],
+  ["[{}] P 검수 · 기획 미반영 오류 1건".format(TODAY_MD), "판정하지 못한 2건은 기획팀 확인 뒤 추가로 전달합니다."])
+t("전달 문구: 실패 1 + 판정 못 함 2 - 목록 유지", "1. F1 오류 · F1" in log, True)
+t("전달 문구: 실패 1 + 판정 못 함 2 - md",
+  ("- 판정 1건 중 **미반영 오류 1건** · 판정 못 함 2건(점검 필요 1 · 차단 1)" in md,
+   "판정하지 못한 2건은 기획팀 확인 뒤 추가로 전달합니다." in md), (True, True))
+t("전달 문구: 실패 1 + 판정 못 함 2 - 개발 탭은 복사 버튼", 'id="copybtn"' in dev, True)
+t("전달 문구: 실패 1 + 판정 못 함 2 - '오류 없음' 류 0", no_defect_words("\n".join(log), md, dev), [])
+
+log, md, dev = deliver([rr("P1", "PASS"), rr("E1", "ERROR")], n_cases=5, partial=True)
+t("전달 문구: 부분 실행 + 점검 필요 - 웍스",
+  log[:3], ["[{}] P 검수 · 판정한 1건 중 기획 미반영 오류 0건".format(TODAY_MD),
+            "일부 케이스만 실행 (전체 5건 중 2건)", "판정하지 못한 1건은 기획팀 확인 뒤 다시 전달합니다."])
+t("전달 문구: 부분 실행 + 점검 필요 - md 머리", "- 일부 케이스만 실행 (전체 5건 중 2건)" in md, True)
+t("전달 문구: 부분 실행 + 점검 필요 - '오류 없음' 류 0", no_defect_words("\n".join(log), md, dev), [])
+
+log, md, dev = deliver([rr("W1", "SKIPPED"), rr("W2", "SKIPPED")])
+t("전달 문구: 전부 승인 대기 - 웍스", log[:2],
+  ["[{}] P 검수 · 판정한 0건 중 기획 미반영 오류 0건".format(TODAY_MD), "승인 대기 2건은 실행하지 않았습니다."])
+t("전달 문구: 전부 승인 대기 - md · 개발 탭 '승인 대기 2건'",
+  ("- 판정 0건 중 **미반영 오류 0건** · 승인 대기 2건" in md, "승인 대기 2건" in dev), (True, True))
+t("전달 문구: 전부 승인 대기 - '오류 없음' 류 0", no_defect_words("\n".join(log), md, dev), [])
+
+log, md, dev = deliver([rr("P1", "PASS"), rr("FL", "FLAKY"), rr("N1", "NA"),
+                        rr("QA-잔여", "ERROR", kind="qa")])
+t("전달 문구: 불안정 · 조건 미충족도 판정 못 함, 잔여 점검은 세지 않음",
+  "- 판정 1건 중 **미반영 오류 0건** · 판정 못 함 2건(불안정 1 · 조건 미충족 1)" in md, True)
+log, md, dev = deliver([rr("P1", "PASS"), rr("P2", "PASS")])
+t("전달 문구: 전부 통과면 지금처럼 '오류 없음'",
+  ("미반영 오류 없음." in log, "어긋난 항목은 없습니다" in md, "전달할 내용 없음" in dev), (True, True, True))
+
+
+# -- results.json 을 리포트보다 먼저 (R3-21) --------------------------
+d = Path(tempfile.mkdtemp(prefix="qa_unit_save_"))
+real_build = qa_run.build_report
+try:
+    def boom(*a, **k):
+        raise RuntimeError("리포트 조립 중 오류")
+    qa_run.build_report = boom
+    got = qa_run.save_outputs({"meta": {"project": "P", "base_url": "http://x"}, "cases": []},
+                              [rr("W1", "ERROR", unclean=True, unclean_inputs=["[QA]x"])], [], d / "run", False,
+                              Path("s.json"), None, {"partial": False, "n_dev": 0})
+    saved = json.loads((d / "run" / "results.json").read_text(encoding="utf-8"))
+    t("results.json: 리포트 생성 예외에도 남음 · unclean 유지",
+      (got, saved["results"][0].get("unclean"), saved["meta"].get("n_dev")), (None, True, 0))
+    t("results.json: 임시 파일이 남지 않음", (d / "run" / "results.json.tmp").exists(), False)
+finally:
+    qa_run.build_report = real_build
+    shutil.rmtree(d, ignore_errors=True)
 
 
 # -- 지난 실행 정리 ----------------------------------------------

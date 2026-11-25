@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>조건 확인</title></head>
+<body>
+<h1 id="title">품절 목록</h1>
+<table><tbody id="rows"></tbody></table>
+<script>
+// 목록을 1초 뒤 POST 조회로 채운다 (precondition 확인 중에 나가는 요청)
+setTimeout(function () {
+  fetch('/api/search', {method: 'POST', body: 'q=1'}).then(function (r) { return r.json(); })
+    .then(function (j) {
+      var h = ''; for (var i = 0; i < j.n; i++) h += '<tr><td>품절 ' + i + '</td></tr>';
+      document.getElementById('rows').innerHTML = h;
+    }).catch(function () {});
+}, 1000);
+</script>
+</body></html>

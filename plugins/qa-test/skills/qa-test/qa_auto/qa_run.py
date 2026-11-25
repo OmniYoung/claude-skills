@@ -53,7 +53,7 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 sys.path.insert(0, str(Path(__file__).parent))
-from report import build_report, _dev_items
+from report import build_report, write_results, _dev_items
 
 # SKILL_DIR: 스킬에 번들된 스크립트·기본 픽스처가 있는 곳. 여기에는 아무것도 쓰지 않는다.
 SKILL_DIR = Path(__file__).parent
@@ -326,6 +326,7 @@ REASON_RUNTIME_WRITE = ("버튼 글자 '{shown}' 에 '{hint}' 이 있어 쓰기 
 # 안전망
 INTERFERE_REQUEST = "요청 차단"     # runner.interfered 에 넣는 값. REASON_INTERFERED 의 {what} 에 들어간다
 INTERFERE_DIALOG = "확인창 취소"
+INTERFERE_POPUP = "다른 창 요청 차단"   # 같은 세션에서 열린 팝업의 쓰기 요청을 막음
 REASON_REQUEST_BLOCKED = ("서버 요청을 막음: {} - 쓰기 승인된 케이스가 아님. 조회용 POST 면 meta.allow_post, "
                           "로그성 요청이면 meta.ignore_requests 에 경로를 적는다")
 REASON_GUARD_ERROR = "안전망 처리 오류로 막음: {} {}"
@@ -339,9 +340,12 @@ REASON_DOWNLOAD_TIMEOUT = "파일이 내려오지 않음 - 시간 초과 ({}초)
 REASON_SESSION = "세션 만료로 중단 - {}"
 REASON_NA = "조건 미충족 - {}"
 REASON_PRE_UNKNOWN = "조건 확인 불가 - {} (anchor 가 없거나 안 보임)"
+REASON_PRE_INTERFERED = "조건 확인 불가 - 안전망 개입({what})으로 화면 흐름이 실제와 다름: {reason}{blocked}"
 REASON_PRE_WRITE = "precondition 스텝은 읽기만 가능: {}"
+REASON_ABSENCE_UNKNOWN = "부재 판정 불가 - {} 가 0개인데 anchor 가 없어 셀렉터가 맞는지 알 수 없음"
 REASON_CLEANUP_FAIL = " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}"
 REASON_FLAKY = "1차 실패, 재실행 통과 - {}"
+REASON_RETRY_ERROR = "1차 실패: {first} / 재실행: {second}"   # 1차 FAIL · 재실행 ERROR (상태는 ERROR)
 # 경고 (코드는 gates.W_*)
 WARN_QA_PREFIX = "{} 스텝{}: 입력값 '{}'에 QA 프리픽스({})가 없음 - 운영 데이터 오염 주의"
 WARN_RESIDUE = "테스트 데이터가 남아 있을 수 있음 - 수동 확인 필요: {}"
@@ -449,6 +453,13 @@ class Runner:
             return None
         return pg is self.page
 
+    def _same_session(self, request):
+        """요청이 지금 페이지와 같은 컨텍스트(세션)의 다른 창에서 나왔는지."""
+        try:
+            return request.frame.page.context is self.page.context
+        except Exception:
+            return False
+
     def _route(self, route, request):
         try:
             method = request.method.upper()
@@ -464,6 +475,14 @@ class Runner:
                 # 팝업 · 앞 케이스가 연 창 · 다른 세션 탭의 요청은 지금 케이스 것이 아니다
                 route.abort("blockedbyclient")
                 self._signal("다른 창의 요청 차단: {} {}".format(method, url[:120]))
+                # 같은 세션에서 연 팝업(선택 팝업 등)의 쓰기 요청을 막으면 부모 화면 흐름도 달라진다.
+                # 막은 것 자체로 실패시키지는 않고, 이후 판정 실패를 개발 전달로 보내지 않게만 한다
+                if (method not in SAFE_METHODS and self._same_session(request)
+                        and not ignored_request(url, self.ignore_requests)):
+                    line = "{} {} (다른 창)".format(method, url[:160])
+                    if line not in self.blocked_log:
+                        self.blocked_log.append(line)
+                    self.interfered.add(INTERFERE_POPUP)
                 return
             if method in SAFE_METHODS:
                 if self.in_click and not self.allow_writes and site_of(url) == self.base_site:
@@ -511,8 +530,10 @@ class Runner:
             raise StepFailure(REASON_REQUEST_BLOCKED.format(" / ".join(lines[:3])))
 
     def check_dismissed(self):
+        """취소한 확인창이 있으면 스텝을 점검 필요로 끝낸다. 이후 판정도 개입으로 친다."""
         if self.dismissed:
             msgs, self.dismissed = self.dismissed, []
+            self.interfered.add(INTERFERE_DIALOG)
             raise StepFailure(REASON_DIALOG_DISMISSED.format(" | ".join(msgs)[:150]))
 
     def attach(self, page):
@@ -571,7 +592,8 @@ class Runner:
         """알럿은 닫고, 확인창(confirm · prompt)은 승인된 쓰기 스텝에서만 수락한다.
 
         삭제 버튼 → "삭제하시겠습니까?" 를 자동 수락하면 dry-run 이어도 지워진다.
-        승인 없이 뜬 확인창은 취소하고 기록해 둔다 (check_dismissed).
+        승인 없이 뜬 확인창은 취소하고 dismissed 에만 기록해 둔다. 다음 스텝(check_dismissed) ·
+        expect_dialog · expect_no_dialog · 판정 변환(final_status)이 이 기록을 소비한다.
         """
         try:
             src = dialog.page
@@ -592,7 +614,6 @@ class Runner:
                     dialog.accept()
                 else:
                     self.dismissed.append(dialog.message)
-                    self.interfered.add(INTERFERE_DIALOG)
                     dialog.dismiss()
             else:
                 dialog.accept()
@@ -662,6 +683,8 @@ class Runner:
             return None
         target = self.page.locator(sel).first
         try:
+            if target.count() == 0:
+                raise LookupError(sel)     # 없는 요소를 3초 기다리지 않는다 (결과는 같음: 기준 요소 주변만)
             target.scroll_into_view_if_needed(timeout=3000)
             self.page.wait_for_timeout(120)
             b = target.bounding_box()
@@ -943,8 +966,8 @@ class Runner:
 
         sel = step.get("selector")
         timeout = step.get("timeout", 10000)
-        # 확인창 취소 기록은 바로 다음 expect_dialog 만 쓸 수 있다
-        if action != "expect_dialog":
+        # 확인창 취소 기록은 바로 다음 expect_dialog · expect_no_dialog 만 쓸 수 있다 (둘이 직접 소비)
+        if action not in ("expect_dialog", "expect_no_dialog"):
             self.check_dismissed()
         self.check_blocked()
         if action in CLEARS_DIALOGS:
@@ -1131,11 +1154,30 @@ class Runner:
             if err:
                 raise AssertFail(err)
             if loc.count() == 0 and not has_anchor:
-                raise StepFailure(
-                    "부재 판정 불가 - {} 가 0개인데 anchor 가 없어 셀렉터가 맞는지 알 수 없음".format(sel))
+                raise StepFailure(REASON_ABSENCE_UNKNOWN.format(sel))
 
         elif action == "expect_text":
             loc = self.page.locator(sel)
+            positive = any(k in step for k in ("contains", "equals", "matches"))
+            if not positive:
+                # not_contains 단독 = 부재 판정. expect_hidden · count:0 과 같은 경로로 본다:
+                # 요소가 0개여도 기다리지 않고, anchor 가 보이면 통과 · anchor 가 없으면 판정 불가
+                has_anchor = self._require_anchor(step, timeout)
+
+                def bad():
+                    ts = loc.all_inner_texts()     # 기다리지 않음 (0개면 빈 목록)
+                    for i, t in enumerate(ts if step.get("all") else ts[:1]):
+                        err = text_mismatch(t, step)
+                        if err:
+                            return ("{}번째 행: ".format(i + 1) if step.get("all") else "") + err
+                    return None
+                err = self._hold(bad, step)
+                if err:
+                    raise AssertFail(err)
+                if loc.count() == 0 and not has_anchor:
+                    raise StepFailure(REASON_ABSENCE_UNKNOWN.format(sel))
+                self.check_blocked()
+                return None
             try:
                 loc.first.wait_for(state="attached", timeout=timeout)
             except PWTimeout:
@@ -1144,7 +1186,8 @@ class Runner:
                 self._require_anchor(step, timeout)
 
             def texts():
-                return loc.all_inner_texts() if step.get("all") else [loc.first.inner_text()]
+                # 목록을 다시 그리다 요소가 떨어지면 기본 30초를 기다리므로 짧게 끊는다
+                return loc.all_inner_texts() if step.get("all") else [loc.first.inner_text(timeout=1000)]
 
             def check():
                 for i, t in enumerate(texts()):
@@ -1153,7 +1196,6 @@ class Runner:
                         return ("{}번째 행: ".format(i + 1) if step.get("all") else "") + err
                 return None
             # 있어야 하는 문구는 그려질 때까지 기다린다. 없어야 하는 문구는 관찰 구간 내내 없어야 한다
-            positive = any(k in step for k in ("contains", "equals", "matches"))
             if positive:
                 err = self._until(check, step.get("settle", 5000))
                 if err:
@@ -1171,8 +1213,7 @@ class Runner:
                 if err:
                     raise AssertFail(err)
                 if loc.count() == 0 and not has_anchor:
-                    raise StepFailure(
-                        "부재 판정 불가 - {} 가 0개인데 anchor 가 없어 셀렉터가 맞는지 알 수 없음".format(sel))
+                    raise StepFailure(REASON_ABSENCE_UNKNOWN.format(sel))
             else:
                 err = self._until(lambda: count_mismatch(loc.count(), step), step.get("settle", 5000))
                 if err:
@@ -1188,7 +1229,7 @@ class Runner:
                 self._missing(sel, step, "속성을 볼 요소가")
 
             def check():
-                val = loc.first.get_attribute(step["attr"]) or ""
+                val = loc.first.get_attribute(step["attr"], timeout=1000) or ""
                 if "equals" in step and val != step["equals"]:
                     return "{} 불일치 - 기대:'{}' / 실제:'{}'".format(step["attr"], step["equals"], val)
                 if "contains" in step and step["contains"] not in val:
@@ -1212,15 +1253,20 @@ class Runner:
                     return None
                 return "알럿 문구 불일치 - 기대: {} / 실제:'{}'".format(desc, " | ".join(self.dialogs))
             err = self._until(check, step.get("timeout", 5000))
-            # 확인창 문구를 본 것이므로 취소 기록은 의도한 것
-            self.dismissed = []
-            self.interfered.discard(INTERFERE_DIALOG)
+            # 취소 기록은 여기서 소비한다. 문구가 다르면 취소 전에 화면에 뜬 문구가 다른 것이라 FAIL 이 맞다.
+            # 문구가 맞아도 확인창을 취소했으므로 이후 화면은 실제 사용(확인을 누름)과 다르다.
+            # 그래서 이후의 판정 실패는 개발 전달로 보내지 않게 개입으로 남긴다
+            cancelled, self.dismissed = bool(self.dismissed), []
             if err:
                 raise AssertFail(err)
+            if cancelled:
+                self.interfered.add(INTERFERE_DIALOG)
 
         elif action == "expect_no_dialog":
             # 알럿은 조작 뒤 조금 늦게 뜰 수 있다. 바로 보면 "안 떴다" 로 거짓 통과한다
             self.page.wait_for_timeout(step.get("ms", 2000))
+            # 확인창이 떴으면 그 자체가 기대와 다른 것(FAIL). 취소 기록은 여기서 소비한다
+            self.dismissed = []
             if self.dialogs:
                 raise AssertFail("알럿이 뜨면 안 되는데 뜸: {}".format(" | ".join(self.dialogs)))
 
@@ -1388,9 +1434,10 @@ def diagnose_chain(runner, case, result, dry_run):
 def final_status(exc, steps, interfered, dismissed, blocked_log):
     """케이스 본 스텝이 끝난 예외를 (상태, 사유) 로 바꾼다. 브라우저 없이 단위 테스트한다.
 
-    exc 가 None 이면 통과. steps(스텝 기록) · dismissed(취소한 확인창) 는 지금 판정에는 쓰지 않는다.
+    exc 가 None 이면 통과. steps(스텝 기록)는 지금 판정에는 쓰지 않는다.
     화면이 기대와 다르면 FAIL, 요소를 못 찾았거나 시간 초과 · 설정 오류면 ERROR(점검 필요).
     ERROR 는 개발 전달에 넣지 않는다. 셀렉터가 낡아서 난 실패를 결함으로 넘기지 않기 위함이다.
+    dismissed 는 아직 소비되지 않은 취소 기록이다 (판정 스텝 도중에 늦게 떠서 취소한 확인창).
     """
     if exc is None:
         return "PASS", ""
@@ -1406,9 +1453,10 @@ def final_status(exc, steps, interfered, dismissed, blocked_log):
         return "ERROR", reason
     # 안전망이 요청을 막았거나 확인창을 취소했으면 화면 흐름이 실제 사용과 다르다.
     # 그 뒤의 판정 실패는 결함이라고 할 수 없으므로 개발 전달로 보내지 않는다
-    if interfered:
+    what = set(interfered) | ({INTERFERE_DIALOG} if dismissed else set())
+    if what:
         return "ERROR", REASON_INTERFERED.format(
-            what=" · ".join(sorted(interfered)), reason=reason,
+            what=" · ".join(sorted(what)), reason=reason,
             blocked=REASON_INTERFERED_BLOCKED.format(" / ".join(blocked_log[:2])) if blocked_log else "")
     return "FAIL", reason
 
@@ -1429,6 +1477,9 @@ def merge_retry(first, second):
         r["flaky"] = first["reason"]
     else:
         r["retried"] = True
+        if first["status"] == "FAIL" and r["status"] == "ERROR":
+            # 재실행이 판정까지 못 갔다고 1차의 판정 실패를 지우지 않는다. 상태는 점검 필요 그대로
+            r["reason"] = REASON_RETRY_ERROR.format(first=first["reason"][:150], second=r["reason"])
     return r
 
 
@@ -1495,10 +1546,20 @@ def run_case(runner, case, blocklist, dry_run):
             result.update(status="BLOCKED", reason=REASON_FIRST_GOTO, blocked_by=BLOCK_FIRST_GOTO)
             return result
 
+    # 새로 접속하는 케이스는 앞 문서를 먼저 내린다. 앞 문서의 타이머 요청 · 늦은 알럿이 이 케이스의
+    # 첫 goto 도중(다음 페이지 응답을 기다리는 동안)에 나가 이 케이스 기록에 섞이지 않게 한다
+    if (case["steps"] or [{}])[0].get("action") == "goto":
+        try:
+            runner.page.goto("about:blank")
+            runner.page.wait_for_timeout(100)
+        except Exception:
+            pass
+
     shots_before = len(runner.shots)
     runner.signals, runner.blocked, runner.dismissed = [], [], []
     runner.get_suspects, runner.interfered, runner.fail_url = [], set(), ""
     runner.blocked_log = []
+    runner.dialogs = []
     runner.anchor = case.get("anchor")
     runner.blocklist = eff_block
     runner.allow_writes = False
@@ -1531,6 +1592,16 @@ def run_case(runner, case, blocklist, dry_run):
                                         "action": act, "pre": bool(step.get("precondition")),
                                         "status": "FAIL", "write": write, "msg": msg})
                 if phase == "test" and step.get("precondition"):
+                    # 안전망이 요청을 막았거나 확인창을 취소했으면 조건이 안 맞는 건지 알 수 없다.
+                    # 조건 미충족(NA)으로 두면 "운영 데이터가 바뀜" 으로 안내되고 연속 NA 경고까지 뜬다
+                    if isinstance(e, AssertFail) and (runner.interfered or runner.blocked or runner.dismissed):
+                        what = set(runner.interfered) | ({INTERFERE_DIALOG} if runner.dismissed else set())
+                        if runner.blocked and not what:
+                            what.add(INTERFERE_REQUEST)
+                        logs = runner.blocked_log or runner.blocked
+                        raise StepFailure(REASON_PRE_INTERFERED.format(
+                            what=" · ".join(sorted(what)), reason=msg,
+                            blocked=REASON_INTERFERED_BLOCKED.format(" / ".join(logs[:2])) if logs else ""))
                     # 조건이 안 맞는 건지, 화면이 안 그려졌거나 셀렉터가 낡은 건지 anchor 로 가른다
                     if isinstance(e, AssertFail) and runner._anchor_visible(step, 2000):
                         raise PreconditionUnmet(msg)
@@ -2341,6 +2412,21 @@ ICONS = {"PASS": "O", "FAIL": "X", "ERROR": "E", "NA": "~", "SKIPPED": "-",
          "BLOCKED": "!", "FLAKY": "?"}
 
 
+def save_outputs(spec, results, warnings, out_dir, dry_run, spec_path, prev, run_meta):
+    """results.json 을 먼저 쓰고 리포트를 만든다. 리포트 경로, 실패하면 None.
+
+    리포트를 만들다 예외가 나도 결과 · 운영 데이터 미정리(unclean) 기록이 남아야 다음 실행의
+    비교 · 정리(prune)가 이 실행을 제대로 다룬다 (results.json 없는 폴더는 지난 실행 목록에서 빠진다).
+    """
+    write_results(out_dir, results, run_meta)
+    try:
+        return build_report(spec, results, warnings, out_dir, dry_run, str(spec_path), prev=prev,
+                            partial=run_meta["partial"], run_meta=run_meta)
+    except Exception as e:
+        print("[!] 리포트 생성 실패 - results.json 은 남음: {} ({})".format(out_dir / "results.json", _reason(e)))
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("spec", nargs="?", help="spec.json 경로")
@@ -2644,9 +2730,7 @@ def main():
     }
     if aborted:
         run_meta["aborted_info"] = aborted
-    report_path = build_report(spec, results, runner.warnings, out_dir,
-                               args.dry_run, str(spec_path), prev=prev,
-                               partial=run_meta["partial"], run_meta=run_meta)
+    report_path = save_outputs(spec, results, runner.warnings, out_dir, args.dry_run, spec_path, prev, run_meta)
 
     # 지난 실행 정리: 최근 N회 · 비교 기준 · 예전 형식 · 사람이 넣은 파일은 남긴다
     protect = {d.resolve() for d in (compare_base, rerun_base, out_dir) if d is not None}
@@ -2667,7 +2751,8 @@ def main():
         print("[*] 지난 실행({}) 대비: 수정됨 {} / 계속 실패 {} / 새로 실패 {} / 판정 불가로 바뀜 {} / "
               "계속 점검 필요 {}".format(prev["name"], tr.count("fixed"), tr.count("still"), tr.count("new"),
                                      tr.count("unjudged"), tr.count("still_err")))
-    print("[*] 리포트: {}".format(report_path))
+    if report_path is not None:
+        print("[*] 리포트: {}".format(report_path))
     n_dev = run_meta["n_dev"]
     if n_dev and not aborted:
         print("[*] 개발 전달용 {}건: {}".format(n_dev, out_dir / "개발전달.md"))
@@ -2684,7 +2769,7 @@ def main():
                 aborted["at"], aborted["msg"][:120]))
         print("    중단된 실행은 개발팀에 전달하지 않습니다.")
         return EXIT_ABORT
-    return 1 if count["FAIL"] or count["ERROR"] else 0
+    return 1 if count["FAIL"] or count["ERROR"] or report_path is None else 0
 
 
 if __name__ == "__main__":

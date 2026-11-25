@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import zipfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -65,6 +66,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path.startswith("/slow/"):
+            # 다음 페이지 응답을 1.5초 늦춘다. 앞 문서가 그동안 살아 있으며 타이머를 돌린다 (케이스 경계)
+            time.sleep(1.5)
+            self.path = self.path[len("/slow"):]
+            return super().do_GET()
         if path == "/api/count":
             return self._json({"n": len(WRITES)})
         if path in ("/api/getwrite", "/api/wget"):
@@ -276,6 +282,62 @@ def sc_absence():
     code, f, meta, res, out, w = run("absence", "--dry-run", "--no-retry")
     expect_status("absence: 늦은 문구는 실패 · 늦게 빠지는 행은 통과", res,
                   {"R3a": "FAIL", "R3b": "FAIL", "R4": "PASS"})
+    expect_status("absence: not_contains 요소 없음 · 늦게 생김 · anchor 사라짐 · 요소 떨어짐", res,
+                  {"R3c": "PASS", "R3d": "ERROR", "R3e": "FAIL", "R3f": "ERROR", "R3g": "ERROR"})
+    check("absence: anchor 없는 not_contains 요소 없음은 부재 판정 불가",
+          has_reason(res, "R3d", qa_run.REASON_ABSENCE_UNKNOWN), reason_of(res, "R3d"))
+    check("absence: 관찰 중 anchor 사라짐 사유", "기준 요소(anchor)가 사라짐" in reason_of(res, "R3f"),
+          reason_of(res, "R3f"))
+    d = res.get("R3g", {}).get("duration", 99)
+    check("absence: 요소가 떨어져도 5초 안에 끝남", d < 5, "{}초 / {}".format(d, reason_of(res, "R3g")))
+
+
+@scenario
+def sc_dlg():
+    code, f, meta, res, out, w = run("dlg", "--dry-run", "--no-retry")
+    ran = expect_status("dlg: 확인창 취소 뒤 판정 · precondition 개입", res,
+                        {"DLG1": "ERROR", "DLG2": "FAIL", "DLG3": "FAIL", "PRE1": "ERROR"})
+    check("dlg: DLG1 사유 '판정 불가 · 확인창 취소'",
+          has_reason(res, "DLG1", qa_run.REASON_INTERFERED) and qa_run.INTERFERE_DIALOG in reason_of(res, "DLG1"),
+          reason_of(res, "DLG1"))
+    check("dlg: PRE1 은 조건 미충족이 아니라 조건 확인 불가(안전망 개입)",
+          has_reason(res, "PRE1", qa_run.REASON_PRE_INTERFERED), reason_of(res, "PRE1"))
+    log = text(f, "웍스등록.txt")
+    check("dlg: 개발 전달 0건 · 웍스 항목 0", ran and meta.get("n_dev") == 0 and "1. " not in log, log[:200])
+    no_writes("dlg: 서버 쓰기 0", ran, w)
+
+
+@scenario
+def sc_allerr():
+    code, f, meta, res, out, w = run("allerr", "--dry-run", "--no-retry")
+    ran = expect_status("allerr: 전부 점검 필요", res, {"Z1": "ERROR", "Z2": "ERROR", "Z3": "ERROR"})
+    log, md, rep = text(f, "웍스등록.txt"), text(f, "개발전달.md"), text(f, "리포트.html")
+    first2 = log.splitlines()[:2]
+    check("allerr: 웍스 첫 두 줄 '판정한 0건 중' · '판정하지 못한 3건'",
+          ran and len(first2) == 2 and first2[0].endswith("rg_allerr 검수 · 판정한 0건 중 기획 미반영 오류 0건")
+          and first2[1] == "판정하지 못한 3건은 기획팀 확인 뒤 다시 전달합니다.", str(first2))
+    dev_tab = rep.split('id="view-dev"', 1)[-1]
+    words = [x for x in ("미반영 오류 없음", "어긋난 항목", "전달할 내용 없음") for body in (log, md, dev_tab)
+             if x in body]
+    check("allerr: 웍스 · md · 개발 탭에 '오류 없음' 류 0", ran and not words, str(words))
+    check("allerr: 개발 탭 '전달 보류 · 판정 못 한 건 3건'", "전달 보류 · 판정 못 한 건 3건" in dev_tab)
+
+
+@scenario
+def sc_popsel():
+    code, f, meta, res, out, w = run("popsel", "--dry-run", "--no-retry")
+    expect_status("popsel: 같은 세션 팝업 요청 차단 뒤 판정은 점검 필요", res, {"SEL1": "ERROR"})
+    check("popsel: 사유에 '다른 창 요청 차단'", qa_run.INTERFERE_POPUP in reason_of(res, "SEL1")
+          and has_reason(res, "SEL1", qa_run.REASON_INTERFERED), reason_of(res, "SEL1"))
+    check("popsel: 개발 전달 0건", meta.get("n_dev") == 0, str(meta.get("n_dev")))
+
+
+@scenario
+def sc_boundary():
+    code, f, meta, res, out, w = run("boundary", "--dry-run", "--no-retry")
+    expect_status("boundary: 앞 문서의 늦은 요청 · 알럿이 다음 케이스에 섞이지 않음", res,
+                  {"BK1": "PASS", "BK2": "PASS", "BA1": "PASS", "BA2": "PASS"})
+    check("boundary: 서버 쓰기 0", not w, str(w))
 
 
 @scenario
@@ -353,7 +415,11 @@ def sc_probe():
 @scenario
 def sc_flaky():
     code, f, meta, res, out, w = run("flaky")
-    expect_status("flaky: 1차 실패 · 재실행 통과는 불안정", res, {"F1": "FLAKY"})
+    expect_status("flaky: 1차 실패 · 재실행 통과는 불안정, 재실행 점검 필요는 점검 필요", res,
+                  {"F1": "FLAKY", "F2": "ERROR"})
+    check("flaky: 1차 실패 · 재실행 점검 필요 사유가 '1차 실패:' 로 시작",
+          reason_of(res, "F2").startswith("1차 실패: ") and has_reason(res, "F2", qa_run.REASON_RETRY_ERROR),
+          reason_of(res, "F2"))
     rep = text(f, "리포트.html")
     check("flaky: 커버리지에서 통과로 안 침", "불안정 1" in rep)
     check("flaky: 1차 스크린샷 _try1 보존", any("_try1" in s for s in res.get("F1", {}).get("shots", [])))
@@ -436,7 +502,8 @@ def sc_bat():
 
 
 ORDER = ["dry", "live", "block", "approved", "allowpost", "confirm", "getw", "late", "lateok", "popup",
-         "race", "absence", "trace", "gate", "sess", "probe", "flaky", "trend", "shared", "smoke", "bat"]
+         "race", "absence", "dlg", "allerr", "popsel", "boundary", "trace", "gate", "sess", "probe", "flaky", "trend",
+         "shared", "smoke", "bat"]
 
 
 def main():

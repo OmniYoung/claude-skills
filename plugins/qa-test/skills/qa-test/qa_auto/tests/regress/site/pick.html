@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>상품 찾기</title></head>
+<body><h1>상품 찾기</h1>
+<script>
+// 레거시 선택 팝업: 조회를 POST 로 한 뒤 고른 값을 부모 화면에 넣고 닫힌다
+fetch('/api/search', {method: 'POST', body: 'q=1'}).then(function (r) { return r.json(); })
+  .then(function () {
+    try { window.opener.document.getElementById('v').textContent = 'A상품'; } catch (e) {}
+    window.close();
+  }).catch(function () {});
+</script>
+</body></html>

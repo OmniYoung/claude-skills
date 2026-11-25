@@ -333,6 +333,9 @@ GET 으로 보내는 쓰기(`delete.php?id=` 링크, 이미지로 보내는 토�
 | `expect_visible` 등, 요소 0개 | ERROR | **FAIL** (그 요소만 없음 = 미노출 결함) | ERROR |
 | `precondition` 어긋남 | ERROR | NA | ERROR |
 
+안전망이 요청을 막았거나 확인창을 취소한 뒤의 `precondition` 어긋남은 anchor 가 보여도 NA 가 아니라
+ERROR("조건 확인 불가 - 안전망 개입") 다. 막힌 조회 때문에 0건이 된 것을 "데이터가 바뀜" 으로 보지 않는다.
+
 ```json
 {"id": "TC-020", "anchor": "table.goods thead",
  "steps": [{"action": "goto", "url": "/admin/goods"},
@@ -374,7 +377,7 @@ GET 으로 보내는 쓰기(`delete.php?id=` 링크, 이미지로 보내는 토�
 | `expect_count` | `selector`, `count` / `min` / `max` | 요소 개수. 기대값이 될 때까지 기다린다. `count: 0` · `max` 는 anchor 필요 |
 | `expect_attr` | `selector`, `attr`, `equals`/`contains` | 속성값 |
 | `expect_dialog` | `equals` / `contains` / `matches`, `timeout` | 직전 조작이 띄운 알럿 · 확인창 문구. `equals` 완전일치(토씨까지), `contains` 부분일치, `matches` 정규식. 늦게 뜨는 알럿을 기다린다 (기본 5000ms) |
-| `expect_no_dialog` | `ms` | 직전 조작 뒤 `ms`(기본 2000) 동안 알럿이 안 떠야 함 |
+| `expect_no_dialog` | `ms` | 직전 조작 뒤 `ms`(기본 2000) 동안 알럿 · 확인창이 안 떠야 함. 떴으면 취소 여부와 무관하게 FAIL |
 | `expect_overflow` | `selector`, `ellipsis`(기본 true) | true 면 넘친 글자가 말줄임(…)으로 잘려야 함, false 면 칸을 넘치지 않아야 함 |
 | `expect_box` | `selector`, `width`, `height`, `below`·`above`·`left_of`·`right_of`·`inside`, `gap`, `align`, `align_to`, `tol` | 크기와 기준 요소와의 상대 위치. 아래 참고 |
 | `expect_js` | `js`, `equals`(기본 true), `desc` | JS 평가 결과 비교. CSS로 표현 못 하는 판정(노출 순서·계산값)에만 쓴다 |
@@ -469,14 +472,17 @@ OPTIONS 외)이 **네트워크 단에서 막힌다.** `write: false` 를 잘못 
 조회를 POST 로 하는 화면은 `meta.allow_post`, 로그성 요청은 `meta.ignore_requests` 에 경로를 적는다.
 
 승인된 쓰기 케이스도 **첫 `goto` 가 끝난 뒤부터 cleanup 까지**, 지금 페이지에서 나간 요청만 통과한다.
-팝업 · 앞 케이스가 남긴 창 · 다른 세션 탭에서 나간 요청은 항상 막는다.
+팝업 · 앞 케이스가 남긴 창 · 다른 세션 탭에서 나간 요청은 항상 막는다. 지금 케이스가 같은 세션에서 연 팝업(선택
+팝업 등)의 쓰기 요청(POST 등)을 막았으면, 그 케이스의 이후 판정이 어긋나도 FAIL 이 아니라 ERROR("판정 불가") 다.
 
 **GET 으로 보내는 쓰기와 웹소켓은 막지 못한다.** blocklist 에 적은 주소 패턴만 막히고, 나머지는 클릭 직후
 나간 같은 사이트 GET 중 쓰기 동사가 든 주소를 리포트에 "GET 쓰기 의심" 으로 남긴다.
 
 "삭제하시겠습니까?" 같은 확인창은 승인된 쓰기 스텝부터 다음 조작 스텝 전까지만 수락하고(늦게 뜨는 확인창 대비),
-나머지는 취소한다. 확인창 문구만 확인하려면 바로 다음 스텝에 `expect_dialog` 를 둔다 (그러면 취소가 의도한
-것으로 처리된다).
+나머지는 취소한다. 확인창 문구만 확인하려면 바로 다음 스텝에 `expect_dialog` 를 둔다. 문구가 다르면 FAIL 이다.
+문구가 맞아도 확인창은 취소된 것이라 그 뒤 화면은 실제 사용(확인을 누름)과 다르다. 그래서 같은 케이스에서
+그 뒤의 판정이 어긋나면 FAIL 이 아니라 ERROR("판정 불가 - 화면 흐름이 달라짐") 다. 확인창이 떴는데 다음 스텝이
+`expect_dialog` · `expect_no_dialog` 가 아니면 그 스텝은 ERROR("확인창 … 을 취소함") 다.
 
 ---
 

@@ -270,6 +270,66 @@ SPECS["absence"] = {"meta": meta("rg_absence"), "cases": [
                                      "anchor": "#tbl thead"}]),
 ]}
 
+# -- 4차 묶음 1: 거짓 전달 ----------------------------------------
+B1 = "b1.html"
+NO = {"action": "expect_text", "selector": "#no-notice", "not_contains": "반품 불가"}
+
+# not_contains 단독은 부재 판정 경로 (R3-04). 요소가 떨어지면 30초 멈추지 않음 (D-03)
+SPECS["absence"]["cases"] += [
+    case("R3c", "not_contains 요소 없음 + anchor 보임", [G(B1), dict(NO, anchor="#title")]),
+    case("R3d", "not_contains 요소 없음 + anchor 없음", [G(B1), dict(NO)]),
+    case("R3e", "not_contains 1초 뒤 금지 문구로 생김",
+         [G(B1), {"action": "expect_text", "selector": "#late-notice", "not_contains": "반품 불가",
+                  "anchor": "#title"}]),
+    case("R3f", "not_contains 관찰 중 anchor 사라짐", [G(B1), dict(NO, anchor="#vanish")]),
+    case("R3g", "판정 대기 중 요소가 떨어짐",
+         [G(B1), {"action": "expect_text", "selector": "#flick", "contains": "완료", "settle": 5000}]),
+]
+
+# 확인창 취소 뒤 판정 · precondition 개입 (R3-01). 문구 불일치 · 뜨면 안 되는 확인창은 FAIL 이 맞다
+SPECS["dlg"] = {"meta": meta("rg_dlg"), "cases": [
+    case("DLG1", "확인창 문구 확인(취소) 뒤 판정",
+         [G(B1), {"action": "click", "selector": "#tolist", "write": False},
+          {"action": "expect_dialog", "contains": "사라집니다"},
+          {"action": "expect_text", "selector": "#title", "equals": "목록"}], area="목록", fix="DLG1 오류"),
+    case("DLG2", "확인창 문구 불일치", [G(B1), {"action": "click", "selector": "#tolist", "write": False},
+                                  {"action": "expect_dialog", "contains": "저장하지 않고"}], kind="gap"),
+    case("DLG3", "뜨면 안 되는 확인창", [G(B1), {"action": "click", "selector": "#ask", "write": False},
+                                   {"action": "expect_no_dialog", "ms": 500}], kind="gap"),
+    case("PRE1", "조건 확인 중 조회 POST 차단",
+         [G("b1pre.html"), {"action": "expect_count", "selector": "#rows tr", "min": 1, "precondition": True,
+                            "anchor": "#title", "settle": 2000}], area="목록", fix="PRE1 오류"),
+]}
+
+# 같은 세션 선택 팝업의 조회 POST 차단 (R3-06)
+SPECS["popsel"] = {"meta": meta("rg_popsel"), "cases": [
+    case("SEL1", "선택 팝업 값이 부모에 들어옴",
+         [G(B1), {"action": "click", "selector": "#pick", "write": False}, {"action": "wait", "ms": 800},
+          {"action": "expect_text", "selector": "#v", "equals": "A상품", "anchor": "#title"}],
+         area="선택", fix="SEL1 오류"),
+]}
+
+# 케이스 경계: 앞 문서의 타이머 요청 · 늦은 알럿 (R3-05). 다음 goto 응답은 1.5초 늦게 온다
+SPECS["boundary"] = {"meta": meta("rg_boundary"), "cases": [
+    case("BK1", "뒤늦은 POST 를 남기는 읽기", [G(B1), {"action": "click", "selector": "#bg", "write": False}]),
+    case("BK2", "느린 다음 페이지", [G("slow/" + B1), {"action": "expect_visible", "selector": "#title"}]),
+    case("BA1", "뒤늦은 알럿을 남기는 읽기", [G(B1), {"action": "click", "selector": "#latealert", "write": False}]),
+    case("BA2", "느린 다음 페이지에서 알럿 없음",
+         [G("slow/" + B1), {"action": "expect_no_dialog", "ms": 1500}]),
+]}
+
+# 전부 판정 못 함인 실행의 전달 문구 (R3-03, 3차 리뷰 repro 6번)
+SPECS["allerr"] = {"meta": meta("rg_allerr"), "cases": [
+    case("Z{}".format(i), "Z{}".format(i),
+         [G(B1), {"action": "expect_visible", "selector": "#nope{}".format(i), "timeout": 800}])
+    for i in range(1, 4)]}
+
+# 1차 실패 · 재실행 점검 필요 (R3-18 B-05)
+SPECS["flaky"]["cases"].append(
+    case("F2", "1차 실패 재실행 점검 필요",
+         [G("retry.html"), {"action": "expect_text", "selector": "#v", "equals": "B", "settle": 500,
+                            "timeout": 800}]))
+
 # 같은 project 의 다른 스펙이 비교 기준을 가로채지 않음 (개발자 D-N6)
 SPECS["m1"] = {"meta": meta("rg_shared"), "cases": [
     case("M1", "M1", [G(BP), {"action": "expect_text", "selector": "#title", "contains": "없는문구", "settle": 300}]),
