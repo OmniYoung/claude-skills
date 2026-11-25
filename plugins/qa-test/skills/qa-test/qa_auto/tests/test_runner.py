@@ -5,6 +5,7 @@
 임시 폴더만 쓰고, 끝나면 그 폴더 하나만 지운다.
 """
 
+import html
 import json
 import shutil
 import sys
@@ -65,10 +66,45 @@ t("이모지는 _", qa_run.safe_name("재고✅"), "재고_")
 r = {"id": "TC-1", "title": "제목", "fix": "", "area": "목록", "source": "SB-01",
      "severity": "치명", "steps": [{"phase": "test", "status": "FAIL",
                                    "msg": "문구 불일치 - 기대:'a' 포함 / 실제:'b'"}], "reason": ""}
-t("fix 없으면 영역 오류: 실제 현상", report._fix_line(r, with_id=True), "[치명] 목록 오류: b (SB: SB-01) · TC-1")
-t("개발 탭은 [치명] 없이", report._fix_line(r, sev_prefix=False), "목록 오류: b (SB: SB-01)")
+t("fix 없으면 영역 오류: '실제' 노출 (SB: 기대)", report._fix_line(r, with_id=True),
+  "[치명] 목록 오류: 'b' 노출 (SB: 'a' 포함) · TC-1")
+t("개발 탭은 [치명] 없이", report._fix_line(r, sev_prefix=False), "목록 오류: 'b' 노출 (SB: 'a' 포함)")
+
+
+# fix 없는 웍스 줄 형식 (R3-35): 테스트 제목 · 셀렉터 · 스텝 이름 대신 영역(없으면 '화면')과 기대 · 실제
+def nofix(msgs, area="", source="스모크", title="크기·위치 실패 (expect_box)"):
+    steps = [{"phase": "test", "status": "FAIL", "action": a, "label": "{} {}".format(a, s), "msg": m}
+             for a, s, m in msgs]
+    return report._fix_line({"id": "TC-9", "title": title, "fix": "", "area": area, "source": source,
+                             "steps": steps, "reason": ""}, with_id=True)
+
+
+line = nofix([("expect_text", "#title", "문구 불일치 - 기대:'틀린문구1' 포함 / 실제:'샘플 상세관리'"),
+              ("expect_count", "button.detail", "개수 불일치 - 기대:3 / 실제:2")], title="soft 검증 여러 개")
+t("fix 없음: 기대 · 실제가 있으면 '실제' 노출 (SB: '기대'), area 없으면 '화면'", line,
+  "화면 오류: '샘플 상세관리' 노출 (SB: '틀린문구1' 포함) · TC-9")
+line = nofix([("expect_count", "tr", "개수 불일치 - 기대:3 / 실제:2")], area="목록")
+t("fix 없음: 따옴표 없는 기대값은 감쌈", line, "목록 오류: '2' 노출 (SB: '3') · TC-9")
+line = nofix([("expect_box", "#chat", "크기·위치 불일치 - #chat: 너비 200px (기대 300px 이상) / "
+               "#banner 오른쪽에 있지 않음 (경계에서 500px 안쪽)")])
+t("fix 없음: 기대 · 실제 없으면 현상 앞 40자… (SB: 근거), 셀렉터 · 제목 · action 이름 없음",
+  (line, "#chat" in line, "expect_box" in line, "크기·위치 실패" in line),
+  ("화면 오류: 크기·위치 불일치 - 너비 200px (기대 300px 이상)… (SB: 스모크) · TC-9", False, False, False))
+line = nofix([("expect_visible", "#x", "안 보임")], area="상단")
+t("fix 없음: 짧은 현상은 말줄임 없이", line, "상단 오류: 안 보임 (SB: 스모크) · TC-9")
+
 t("주소의 토큰 가림", report._mask_url("https://a/x?sid=abc&page=2&access_token=zz"),
   "https://a/x?sid=***&page=2&access_token=***")
+# 이름에 token · session · secret · passw 가 들어 있으면 가림, 짧은 이름은 전체 일치만 (오케스트레이터 결정)
+t("주소 가림: 이름 일부 일치 (session_id · auth_token · id_token · client_secret · passwd · userPassword)",
+  report._mask_url("https://a/cb?session_id=1&auth_token=2&id_token=3&client_secret=4&passwd=5&userPassword=6"),
+  "https://a/cb?session_id=***&auth_token=***&id_token=***&client_secret=***&passwd=***&userPassword=***")
+t("주소 가림: 짧은 이름은 전체 일치 (sid · jsessionid · phpsessid · auth · pw · csrf · apikey · key · code_verifier)",
+  report._mask_url("https://a/x?SID=1&PHPSESSID=2&auth=3&pw=4&csrf=5&apikey=6&key=7&code_verifier=8#jsessionid=9"),
+  "https://a/x?SID=***&PHPSESSID=***&auth=***&pw=***&csrf=***&apikey=***&key=***&code_verifier=***#jsessionid=***")
+t("주소 가림: goods_code · keyword · page · author · code · monkey 는 남김",
+  report._mask_url("https://a/x?goods_code=1&keyword=타이레놀&page=2&author=kim&code=9&monkey=3"),
+  "https://a/x?goods_code=1&keyword=타이레놀&page=2&author=kim&code=9&monkey=3")
 # 이름 전체가 같을 때만 가림. 재현에 쓰는 상품코드 · 검색어는 남기고 fragment 토큰은 가림 (R3-27)
 t("주소 가림: 상품코드 · 검색어는 남김", report._mask_url("https://a/goods?goods_code=12345&keyword=타이레놀"),
   "https://a/goods?goods_code=12345&keyword=타이레놀")
@@ -88,7 +124,8 @@ FS = qa_run.final_status
 REQ, DLG = qa_run.INTERFERE_REQUEST, qa_run.INTERFERE_DIALOG
 FS_TABLE = [
     ("예외 없음 = 통과", None, set(), [], [], "PASS", ""),
-    ("세션 만료", qa_run.SessionExpired("만료"), set(), [], [], "ERROR", "세션 만료로 중단 - 만료"),
+    ("세션 만료", qa_run.SessionExpired("만료"), set(), [], [], "ERROR",
+     "로그인이 풀려 중단됨 - login_qa.bat 으로 다시 로그인한 뒤 실행합니다. 만료"),
     ("쓰기 차단", qa_run.WriteBlocked("막음", "undeclared"), set(), [], [], "BLOCKED", "막음"),
     ("조건 미충족", qa_run.PreconditionUnmet("없음"), set(), [], [], "NA", "조건 미충족 - 없음"),
     ("스크립트 문제", qa_run.StepFailure("요소 없음"), set(), [], [], "ERROR", "요소 없음"),
@@ -98,25 +135,35 @@ FS_TABLE = [
      "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 (Timeout 3000ms exceeded.)"),
     ("판정 실패", qa_run.AssertFail("문구 불일치"), set(), [], [], "FAIL", "문구 불일치"),
     ("요청 차단 뒤 판정 실패", qa_run.AssertFail("문구 불일치"), {REQ}, [], ["POST /a", "POST /b", "POST /c"],
-     "ERROR", "판정 불가 - 요청 차단로 화면 흐름이 달라짐: 문구 불일치 / 막은 요청: POST /a / POST /b"),
+     "ERROR", "판정 불가 - 안전망 개입(요청 차단)으로 화면 흐름이 실제와 다름. "
+              "막은 요청: POST /a / POST /b · 이후 결과: 문구 불일치"),
     ("확인창 취소 뒤 판정 실패", qa_run.AssertFail("문구 불일치"), {DLG}, ["삭제?"], [],
-     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 문구 불일치"),
+     "ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: 문구 불일치"),
     ("둘 다 개입", qa_run.AssertFail("x"), {DLG, REQ}, [], ["POST /a"],
-     "ERROR", "판정 불가 - 요청 차단 · 확인창 취소로 화면 흐름이 달라짐: x / 막은 요청: POST /a"),
+     "ERROR", "판정 불가 - 안전망 개입(요청 차단 · 확인창 취소)으로 화면 흐름이 실제와 다름. "
+              "막은 요청: POST /a · 이후 결과: x"),
     # 확인창 4조합 (R3-01). 취소 기록은 dismissed 에만 쌓이고, expect_dialog 가 통과하면 interfered 를 켠다
     ("취소 → expect_dialog 통과(interfered 켜짐) → 판정 실패 = 점검 필요", qa_run.AssertFail("x"), {DLG}, [], [],
-     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: x"),
+     "ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: x"),
     ("expect_dialog 문구 불일치(취소 기록 소비) = 실패", qa_run.AssertFail("알럿 불일치"), set(), [], [],
      "FAIL", "알럿 불일치"),
     ("판정 스텝 도중 취소(dismissed 만 남음) + 판정 실패 = 점검 필요", qa_run.AssertFail("x"), set(), ["삭제?"], [],
-     "ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: x"),
+     "ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: x"),
     ("확인창 뜬 뒤 expect_no_dialog 실패(취소 기록 소비, 개입 없음) = 실패", qa_run.AssertFail("알럿이 뜸"),
      set(), [], [], "FAIL", "알럿이 뜸"),
     ("같은 세션 팝업 요청 차단 뒤 판정 실패 = 점검 필요", qa_run.AssertFail("x"), {qa_run.INTERFERE_POPUP}, [],
-     ["POST /p (다른 창)"], "ERROR", "판정 불가 - 다른 창 요청 차단로 화면 흐름이 달라짐: x / 막은 요청: POST /p (다른 창)"),
+     ["POST /p (다른 창)"], "ERROR", "판정 불가 - 안전망 개입(다른 창 요청 차단)으로 화면 흐름이 실제와 다름. "
+                                     "막은 요청: POST /p (다른 창) · 이후 결과: x"),
 ]
 for name, exc, itf, dis, blog, want_s, want_r in FS_TABLE:
     t("final_status: " + name, FS(exc, [], itf, dis, blog), (want_s, want_r))
+# R3-17: "{what}로" 조사 오류가 어떤 개입 조합에서도 안 생김 (받침 있는 '차단' 뒤 '로')
+for itf in ({REQ}, {qa_run.INTERFERE_POPUP}, {REQ, DLG}, {DLG}):
+    t("final_status: 조사 '차단로' 없음 · " + " · ".join(sorted(itf)),
+      "차단로" in FS(qa_run.AssertFail("x"), [], itf, [], ["POST /a"])[1], False)
+t("판정 불가 · 조건 확인 불가 문장의 앞부분이 같음 (안전망 개입 … 실제와 다름. … 이후 결과:)",
+  (qa_run.REASON_INTERFERED.split(" - ", 1)[1], qa_run.REASON_PRE_INTERFERED.split(" - ", 1)[1]),
+  (qa_run.REASON_PRE_INTERFERED.split(" - ", 1)[1],) * 2)
 
 # -- 재실행 병합 (merge_retry) 현행 동작 ------------------------
 def res(status, reason="", shots=(), duration=1.0):
@@ -146,10 +193,36 @@ from gates import W_NO_FIX, W_ABSENCE_NO_ANCHOR, W_PRE_NO_ANCHOR, W_RESIDUE, W_S
 warns = [(W_NO_FIX, "A: 문장을 바꿔도"), (W_NO_FIX, "B: 묶임"), (W_ABSENCE_NO_ANCHOR, "A: x"),
          (W_PRE_NO_ANCHOR, "C: y"), (W_QA_PREFIX, "A 스텝1: 프리픽스 없음"), ("unknown_code", "새 경고")]
 blk = report._warn_blocks(warns)
-t("경고 묶음: 스펙 점검은 코드로 묶음 (문장 무관)", "<li>fix 없음 2건: A, B</li>" in blk, True)
-t("경고 묶음: anchor 코드 둘은 한 줄", "<li>anchor 없는 판정 2건: A, C</li>" in blk, True)
+t("경고 묶음: 스펙 점검은 코드로 묶음 (문장 무관)", "<li>fix 없음 2건: A, B (" in blk, True)
+t("경고 묶음: anchor 코드 둘은 한 줄", "<li>anchor 없는 판정 2건: A, C (" in blk, True)
 t("경고 묶음: 스펙 점검 건수", "스펙 점검 4건" in blk, True)
 t("경고 묶음: 모르는 코드 · 실행 경고는 주황", "확인할 경고 2건" in blk, True)
+# 스펙 점검 블록 (R3-32): 공통 '판정에는 영향이 없습니다' 대신 줄마다 영향 한 마디
+from gates import (W_NO_AREA, W_UNKNOWN_REQ, W_SOFT_POSITION, W_APPROVED_FIRST_GOTO, W_BROAD_ANCHOR,  # noqa: E402
+                   W_SHORT_BLOCK, W_BLOCKLIST_OFF)
+every = [(c, "K: x") for c in (W_NO_FIX, W_NO_AREA, W_ABSENCE_NO_ANCHOR, W_UNKNOWN_REQ, W_SOFT_POSITION,
+                               W_APPROVED_FIRST_GOTO, W_BROAD_ANCHOR, W_SHORT_BLOCK, W_BLOCKLIST_OFF)]
+blk = report._warn_blocks(every)
+lint_lis = [x for x in blk.split('id="lint"', 1)[1].split("<li>")[1:]]
+t("스펙 점검: 공통 안내 '판정에는 영향이 없습니다' 없음", "판정에는 영향이 없습니다" in blk, False)
+t("스펙 점검: 줄마다 괄호 영향 문구 (종류 전부)",
+  (len(lint_lis), all(li.split("</li>")[0].endswith(")") for li in lint_lis)), (len(report.LINT_EFFECT), True))
+t("스펙 점검: 영향 문구가 모든 묶음 이름에 있음", set(report.LINT_KINDS.values()) <= set(report.LINT_EFFECT), True)
+blk = html.unescape(blk)
+t("스펙 점검: fix 없음 · anchor · 첫 스텝 영향",
+  ("fix 없음 1건: K (웍스 줄이 '영역 오류: 현상' 으로 대신 나감)" in blk,
+   "anchor 없는 판정 1건: K (요소가 없으면 점검 필요로 나옴)" in blk,
+   "승인 쓰기 케이스 첫 스텝 goto 아님 1건: K (실행 안 됨)" in blk), (True, True, True))
+
+
+def fail_res(cid, fix="", status="FAIL", **kw):
+    return dict({"id": cid, "title": "t", "status": status, "kind": "defect", "fix": fix, "steps": [],
+                 "reason": "r", "requirement": "", "source": ""}, **kw)
+
+
+todo = report._todo_html([fail_res("A"), fail_res("B", fix="x"), fail_res("C"), fail_res("D", status="ERROR")],
+                         [], [(W_NO_FIX, "A: x"), (W_NO_FIX, "C: x"), (W_NO_FIX, "D: x"), (W_NO_FIX, "E: x")], 3)
+t("할 일: fix 없음은 이번 전달(실패) 중 건수 · 범위 표기", "이번 전달 중 fix 없음 2건" in todo, True)
 todo = report._todo_html([], [], [(W_SELECTOR_UPDATE, "아무 문장"), (W_RESIDUE, "아무 문장")], 0)
 t("할 일: 셀렉터 갱신 · 잔여 데이터는 코드로", ("셀렉터 갱신 요청" in todo, "잔여 데이터 확인" in todo), (True, True))
 todo = report._todo_html([], [], [(W_QA_PREFIX, "셀렉터 갱신 필요: 테스트 데이터가 남아")], 0)
@@ -251,7 +324,8 @@ t("run_case: 시간 초과 아닌 점검 필요는 timeout 없음", (r["status"]
 r = run_fake([GOTO, {"action": "click", "selector": "#tab", "write": False, "_block": "POST /api/x"},
               {"action": "expect_text", "selector": "#a", "contains": "x", "_raise": qa_run.AssertFail("다름")}])
 t("run_case: 요청을 막은 뒤 판정 실패는 점검 필요",
-  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 요청 차단로 화면 흐름이 달라짐: 다름 / 막은 요청: POST /api/x"))
+  (r["status"], r["reason"]),
+  ("ERROR", "판정 불가 - 안전망 개입(요청 차단)으로 화면 흐름이 실제와 다름. 막은 요청: POST /api/x · 이후 결과: 다름"))
 r = run_fake([GOTO, {"action": "click", "selector": "#tab", "write": False, "_pending": "POST /api/x"}])
 t("run_case: 마지막 스텝 뒤 남은 차단은 점검 필요 (사유에 설정 키 없음)",
   (r["status"], r["reason"], "meta." in r["reason"]),
@@ -285,7 +359,7 @@ try:
     t("run_case: 세션 만료는 전체 중단", "중단 안 됨", "SessionAbort")
 except qa_run.SessionAbort as e:
     t("run_case: 세션 만료는 전체 중단", (e.result["status"], e.result["reason"], e.result.get("aborted")),
-      ("ERROR", "세션 만료로 중단 - 만료", True))
+      ("ERROR", qa_run.REASON_SESSION.format("만료"), True))
 
 
 # 세션 만료 안내에 실행 중 최근 막은 요청 (R3-14, A-07)
@@ -356,13 +430,13 @@ CLICK = {"action": "click", "selector": "#tolist", "write": False, "_dialog": LE
 r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "사라집니다"},
               {"action": "expect_text", "selector": "#title", "equals": "목록", "_raise": qa_run.AssertFail("다름")}])
 t("확인창: 취소 → expect_dialog 통과 → 판정 실패 = 점검 필요",
-  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 다름"))
+  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: 다름"))
 r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "다른 문구", "timeout": 30}])
 t("확인창: expect_dialog 문구 불일치 = 실패", (r["status"], r["reason"].startswith("알럿 문구 불일치")), ("FAIL", True))
 r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "_dialog": "삭제?",
                      "_raise": qa_run.AssertFail("다름")}])
 t("확인창: 판정 스텝 도중 취소 + 판정 실패 = 점검 필요",
-  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 확인창 취소로 화면 흐름이 달라짐: 다름"))
+  (r["status"], r["reason"]), ("ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: 다름"))
 r = run_fake([GOTO, dict(CLICK, _dialog="삭제?"), {"action": "expect_no_dialog", "ms": 0}])
 t("확인창: confirm 뜬 뒤 expect_no_dialog = 실패", (r["status"], r["reason"]), ("FAIL", "알럿이 뜨면 안 되는데 뜸: 삭제?"))
 r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "사라집니다"}])
@@ -380,7 +454,7 @@ r = run_fake([GOTO, {"action": "expect_count", "selector": "tr", "min": 1, "prec
                      "_anchor_ok": True, "_block": "POST /api/list", "_raise": qa_run.AssertFail("0건")}])
 t("precondition: 요청 차단 뒤 어긋남 = 점검 필요 (조건 미충족 아님)",
   (r["status"], r["reason"]),
-  ("ERROR", "조건 확인 불가 - 안전망 개입(요청 차단)으로 화면 흐름이 실제와 다름: 0건 / 막은 요청: POST /api/list"))
+  ("ERROR", "조건 확인 불가 - 안전망 개입(요청 차단)으로 화면 흐름이 실제와 다름. 막은 요청: POST /api/list · 이후 결과: 0건"))
 r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "precondition": True, "anchor": "#b",
                      "_anchor_ok": True, "_dialog": "이동?", "_raise": qa_run.AssertFail("없음")}])
 t("precondition: 확인창 취소 뒤 어긋남 = 점검 필요",
@@ -616,6 +690,86 @@ try:
        b'"name": "ticket", "value": "***"' in blob), (True, True, True))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+# -- 콘솔 끝 요약 (R3-28) ----------------------------------------------
+lines = qa_run.console_summary([
+    {"id": "1", "status": "PASS"}, {"id": "2", "status": "PASS", "get_suspects": ["GET a"]},
+    {"id": "3", "status": "FAIL"}, {"id": "4", "status": "ERROR"}, {"id": "5", "status": "FLAKY"},
+    {"id": "6", "status": "NA", "get_suspects": ["GET b", "GET c"]}, {"id": "7", "status": "BLOCKED"},
+    {"id": "8", "status": "SKIPPED"}, {"id": "9", "status": "SKIPPED"}])
+t("콘솔 요약: 결과 줄에 차단 · 승인 대기 · 전체, GET 쓰기 의심 줄 (케이스 수)", lines, [
+    "[*] 결과: 통과 2 / 실패 1 / 점검 필요 1 / 불안정 1 / 조건 미충족 1 / 차단 1 / 승인 대기 2 / 전체 9",
+    "[!] GET 쓰기 의심 2건 - 운영 데이터가 바뀌었을 수 있습니다. 담당 기획자에게 알리고 이 스펙은 다시 돌리지 마세요."])
+t("콘솔 요약: 의심 없으면 한 줄", len(qa_run.console_summary([{"id": "1", "status": "PASS"}])), 1)
+note = qa_run.REASON_SESSION_BLOCKED.format("POST /api/auth/refresh")
+msg = qa_run.SESSION_AT.format("http://x/login") + " / " + note
+t("세션 중단 콘솔: 앞 줄에서 '직전에 막은 요청' 뺌 (끝 안내에 한 번만)",
+  qa_run._without_note(msg, note), "(중단 시점 주소: http://x/login)")
+t("세션 중단 콘솔: 막은 요청 없으면 그대로", qa_run._without_note("(중단 시점 주소: a)", ""), "(중단 시점 주소: a)")
+t("긴 중단 사유는 … 로 자름", (qa_run._clip("가" * 130, 120), qa_run._clip("짧음", 120)), ("가" * 120 + "…", "짧음"))
+
+
+# -- 리포트 색 · 할 일 · 탭 (R3-29 · R3-33 · R3-34) ---------------------
+def card(status, **kw):
+    r = dict({"id": "C1", "title": "t", "status": status, "kind": "defect", "fix": "", "steps": [],
+              "reason": "", "requirement": "", "source": "", "duration": 1, "shots": []}, **kw)
+    return report._case_block(r, {}, "s.json")
+
+
+t("치명 태그 빨강은 실패일 때만",
+  {s: "k-red" in card(s, severity="치명") for s in ("FAIL", "PASS", "ERROR", "FLAKY", "NA")},
+  {"FAIL": True, "PASS": False, "ERROR": False, "FLAKY": False, "NA": False})
+c = card("FAIL", unclean=True, unclean_inputs=["[QA]x"])
+t("운영 데이터 미정리 칸은 주황(unclean), 빨강 reason 아님",
+  ('<dd class="unclean">정리되지 않음' in c, '<dd class="reason">정리되지 않음' in c), (True, False))
+todo = report._todo_html([fail_res("A", unclean=True)], [], [], 0)
+t("할 일: 운영 데이터 미정리는 주황", ('class="todo red"' in todo, "운영 데이터 미정리 1건" in todo), (False, True))
+c = card("PASS", get_suspects=["GET http://h/api/toggle?sid=s ('toggle')"])
+t("GET 쓰기 의심: 카드 머리줄 주황 태그 · 안내 문구",
+  ('<span class="ktag k-warn">GET 쓰기 의심</span>' in c.split('class="cbody"')[0], "GET 쓰기 의심 주소 막아줘" in c),
+  (True, True))
+sus_res = [fail_res("G1", status="PASS", get_suspects=["GET http://h/a?x=1 ('toggle')", "GET http://h/b ('save')"]),
+           fail_res("G2", status="PASS"), fail_res("G3", status="NA", get_suspects=["GET http://h/c?token=t ('del')"])]
+blk = html.unescape(report._warn_blocks([], sus_res))
+warn_lis = blk.split('id="warn"', 1)[1].split("</details>")[0].count("<li>")
+t("GET 쓰기 의심: #warn 목록 케이스마다 한 줄 (케이스 ID · 주소 · 외 N건 · 토큰 가림)",
+  (warn_lis, "G1</a> · GET http://h/a?x=1 ('toggle') 외 1건" in blk, "token=***" in blk, "확인할 경고 2건" in blk),
+  (2, True, True, True))
+todo = report._todo_html(sus_res, [], [], 0)
+t("할 일: GET 쓰기 의심은 #warn 으로", ('href="#warn"' in todo and "GET 쓰기 의심 2건" in todo), True)
+t("할 일: 중단 실행 첫 항목 (세션 만료 = 다시 로그인 후 실행)",
+  report._todo_html([fail_res("A", status="ERROR")], [], [], 0, True,
+                    {"aborted_info": {"why": "session"}}).split("</b>", 1)[1].startswith(
+      '<a class="todo" href="#abort">다시 로그인 후 실행</a>'), True)
+t("할 일: 중단 실행 첫 항목 (그 밖 = 다시 실행 필요)",
+  report._todo_html([], [], [], 0, True, {"aborted_info": {"why": "error"}}).split("</b>", 1)[1].startswith(
+      '<a class="todo" href="#abort">다시 실행 필요</a>'), True)
+t("중단 알림에 이동 대상 id · 120자 넘으면 …",
+  (lambda h: ('id="abort"' in h, "가" * 120 + "…" in h))(report._aborted_html(
+      {"aborted_info": {"at": 1, "total": 3, "case": "K", "why": "error", "msg": "가" * 130}}, [])), (True, True))
+t("세션 만료 알림 · 카드 사유가 같은 안내 문장",
+  ("login_qa.bat 으로 다시 로그인한 뒤 실행합니다" in report._aborted_html(
+      {"aborted_info": {"at": 1, "total": 3, "case": "K", "why": "session"}}, []),
+   "login_qa.bat 으로 다시 로그인한 뒤 실행합니다" in qa_run.REASON_SESSION), (True, True))
+tmp2 = Path(tempfile.mkdtemp(prefix="qa_rep_"))
+try:
+    spec = {"meta": {"project": "p", "base_url": "http://h"}, "cases": [{"id": "A"}, {"id": "B"}]}
+    rs = [dict(fail_res("A", status="ERROR", reason=qa_run.REASON_SESSION.format("(중단 시점 주소: http://h/login)")),
+               duration=1, shots=[])]
+    html_ = report.build_report(spec, rs, [], tmp2, False, run_meta={
+        "aborted": True, "aborted_info": {"at": 1, "total": 2, "case": "A", "why": "session", "msg": "x"}}).read_text(
+        encoding="utf-8")
+    tabs = html_.split('<nav class="tabs"', 1)[1].split("</nav>")[0]
+    t("중단 실행: 개발 탭 숫자 '보류' (0 아님)", ('개발 전달용<span class="cnt">보류</span>' in tabs,
+                                        '개발 전달용<span class="cnt">0</span>' in tabs), (True, False))
+    t("중단 실행: 할 일 첫 항목 '다시 로그인 후 실행'",
+      html_.split('<div class="todoline"><b>할 일</b>', 1)[1].startswith('<a class="todo" href="#abort">다시 로그인 후 실행'),
+      True)
+    t("리포트 어디에도 '요청 차단로' 없음 · .step-skip 규칙 없음", ("요청 차단로" in html_, ".step-skip" in html_),
+      (False, False))
+finally:
+    shutil.rmtree(tmp2, ignore_errors=True)
 
 
 if __name__ == "__main__":

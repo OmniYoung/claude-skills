@@ -355,19 +355,22 @@ REASON_WRITE_FALSE_SENT = ("write:false 로 둔 버튼이 서버 요청을 보�
 REASON_GUARD_ERROR = "안전망 처리 오류로 막음: {} {}"
 REASON_DIALOG_DISMISSED = ("확인창 '{}' 을 취소함 - 쓰기 승인된 스텝이 아님. 문구만 확인하려면 "
                            "다음 스텝에 expect_dialog 를 둔다")
-REASON_INTERFERED = "판정 불가 - {what}로 화면 흐름이 달라짐: {reason}{blocked}"
-REASON_INTERFERED_BLOCKED = " / 막은 요청: {}"   # REASON_INTERFERED 의 {blocked} (막은 요청이 있을 때)
+# {what} 은 INTERFERE_* 를 " · " 로 이은 것. "개입으로" 로 받아 {what} 끝 글자 받침과 상관없이 조사가 맞는다
+REASON_INTERFERED = "판정 불가 - 안전망 개입({what})으로 화면 흐름이 실제와 다름. {blocked}이후 결과: {reason}"
+REASON_INTERFERED_BLOCKED = "막은 요청: {} · "   # REASON_INTERFERED 의 {blocked} (막은 요청이 있을 때)
 # 판정 결과
 REASON_TIMEOUT = "시간 초과 - 요소가 없거나 셀렉터가 바뀌었을 수 있음 ({})"
 REASON_DOWNLOAD_TIMEOUT = "파일이 내려오지 않음 - 시간 초과 ({}초)"
-REASON_SESSION = "세션 만료로 중단 - {}"
+# 리포트 중단 알림과 같은 문장. {} 는 SessionExpired 문장 (중단 시점 주소, 직전에 막은 요청)
+REASON_SESSION = "로그인이 풀려 중단됨 - login_qa.bat 으로 다시 로그인한 뒤 실행합니다. {}"
+SESSION_AT = "(중단 시점 주소: {})"      # SessionExpired 문장 앞부분
 # 세션 만료 사유 · 중단 알림 · 콘솔 끝에 붙인다. 토큰 갱신 POST 를 안전망이 막아 앱이 스스로 로그아웃한 경우
 # 다시 로그인해도 같은 결과라서. {} 는 실행 중 최근에 막은 요청 (Runner.recent_blocked, "POST /경로")
 REASON_SESSION_BLOCKED = ("직전에 막은 요청: {} - 로그인 유지 요청이면 다시 로그인해도 같은 결과가 납니다. "
                           "Claude 에게 \"막힌 요청 분류해줘\" 라고 요청합니다.")
 REASON_NA = "조건 미충족 - {}"
 REASON_PRE_UNKNOWN = "조건 확인 불가 - {} (anchor 가 없거나 안 보임)"
-REASON_PRE_INTERFERED = "조건 확인 불가 - 안전망 개입({what})으로 화면 흐름이 실제와 다름: {reason}{blocked}"
+REASON_PRE_INTERFERED = "조건 확인 불가 - 안전망 개입({what})으로 화면 흐름이 실제와 다름. {blocked}이후 결과: {reason}"
 REASON_PRE_WRITE = "precondition 스텝은 읽기만 가능: {}"
 REASON_ABSENCE_UNKNOWN = "부재 판정 불가 - {} 가 0개인데 anchor 가 없어 셀렉터가 맞는지 알 수 없음"
 REASON_CLEANUP_FAIL = " / [!] cleanup 실패 - 생성 데이터 수동 확인 필요: {}"
@@ -380,6 +383,33 @@ WARN_SELECTOR_UPDATE = ("셀렉터 갱신 필요: {} 가 {}건에서 시간 초�
                         "Claude 에게 '{} 셀렉터 갱신해줘' 라고 요청")
 WARN_NA_STREAK = ("{}: {}회 연속 조건 미충족 - precondition 이 실제 결함을 가리고 있지 않은지 "
                   "다른 경로로 확인 필요")
+# 콘솔 끝 요약 (bat 창). bat 사용자는 콘솔만 보고 닫는 경우가 많아 위험 신호도 여기 싣는다
+CONSOLE_RESULT = ("[*] 결과: 통과 {PASS} / 실패 {FAIL} / 점검 필요 {ERROR} / 불안정 {FLAKY} / 조건 미충족 {NA} / "
+                  "차단 {BLOCKED} / 승인 대기 {SKIPPED} / 전체 {total}")
+CONSOLE_GET_SUSPECT = ("[!] GET 쓰기 의심 {}건 - 운영 데이터가 바뀌었을 수 있습니다. "
+                       "담당 기획자에게 알리고 이 스펙은 다시 돌리지 마세요.")
+
+
+def console_summary(results):
+    """콘솔 끝 요약 줄. 결과 건수 한 줄, GET 쓰기 의심이 있으면 한 줄 더 (리포트 할 일과 같은 건수)."""
+    n = {k: sum(1 for r in results if r["status"] == k)
+         for k in ("PASS", "FAIL", "ERROR", "FLAKY", "NA", "BLOCKED", "SKIPPED")}
+    lines = [CONSOLE_RESULT.format(total=len(results), **n)]
+    sus = sum(1 for r in results if r.get("get_suspects"))
+    if sus:
+        lines.append(CONSOLE_GET_SUSPECT.format(sus))
+    return lines
+
+
+def _clip(s, n):
+    """n 자에서 자르고 잘렸으면 … 를 붙인다 (경로 중간에서 끊긴 걸 알아보게)."""
+    s = str(s or "")
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _without_note(msg, note):
+    """세션 중단 문장에서 '직전에 막은 요청' 부분을 뺀다 (콘솔 끝 안내에 따로 찍으므로)."""
+    return msg.replace(" / " + note, "") if note else msg
 
 
 def _reason(e):
@@ -696,9 +726,7 @@ class Runner:
                     body_hit = False
             if url_hit or body_hit:
                 note = self.session_note()
-                raise SessionExpired(
-                    "로그인 세션이 만료된 것으로 보인다 (현재 URL: {}). "
-                    "인증 파일을 갱신한 뒤 다시 실행할 것.{}".format(self.page.url, " / " + note if note else ""))
+                raise SessionExpired(SESSION_AT.format(self.page.url) + (" / " + note if note else ""))
 
     def _warn_prefix(self, value, case_id, idx):
         """테스트로 만든 데이터인지 눈으로 구분되게 QA 프리픽스를 권한다.
@@ -2682,7 +2710,7 @@ def main():
     need = int(meta.get("runner_min", 0) or 0)
     if need > RUNNER_VERSION:
         print("[!] 이 스펙은 러너 버전 {} 이상이 필요합니다 (설치된 러너: {}).".format(need, RUNNER_VERSION))
-        print("    qa-test 플러그인을 업데이트한 뒤 다시 실행하세요.")
+        print('    Claude Code 에 "qa-test 플러그인 업데이트해줘" 라고 요청한 뒤 다시 실행하세요.')
         return 1
 
     # 개발 전달로 가는 값(kind · severity · source)이 틀리면 엉뚱한 건이 개발팀에 간다
@@ -2871,7 +2899,9 @@ def main():
                                "why": "session", "recent_blocked": list(runner.recent_blocked),
                                "note": runner.session_note()}
                     lbl = e.result["session"]
-                    print("\n[!] 실행 중단 - {}{}".format("[{}] ".format(lbl) if lbl else "", e))
+                    # "직전에 막은 요청" 은 콘솔 끝 안내에 한 번만 찍는다
+                    print("\n[!] 실행 중단 - {}로그인이 풀림 {}".format(
+                        "[{}] ".format(lbl) if lbl else "", _without_note(str(e), aborted["note"])))
                     break
                 except Exception as e:
                     # 브라우저가 죽었거나 쿠키 파일이 깨지는 등 케이스 밖의 문제. 그때까지 결과로 리포트는 남긴다
@@ -2943,10 +2973,10 @@ def main():
     if removed:
         print("[*] 오래된 실행 {}개 정리".format(len(removed)))
 
-    count = {k: sum(1 for r in results if r["status"] == k)
-             for k in ("PASS", "FAIL", "ERROR", "NA", "FLAKY")}
-    print("\n[*] 결과: 통과 {} / 실패 {} / 점검 필요 {} / 불안정 {} / 조건 미충족 {} / 전체 {}".format(
-        count["PASS"], count["FAIL"], count["ERROR"], count["FLAKY"], count["NA"], len(results)))
+    count = {k: sum(1 for r in results if r["status"] == k) for k in ("FAIL", "ERROR")}
+    print()
+    for line in console_summary(results):
+        print(line)
     if prev:
         tr = [r.get("trend") for r in results]
         print("[*] 지난 실행({}) 대비: 수정됨 {} / 계속 실패 {} / 새로 실패 {} / 판정 불가로 바뀜 {} / "
@@ -2969,7 +2999,7 @@ def main():
                 print("    " + aborted["note"])
         else:
             print("[!] {}번째 케이스에서 실행이 멈췄습니다 ({}). 그때까지 결과로 리포트를 만들었습니다.".format(
-                aborted["at"], aborted["msg"][:120]))
+                aborted["at"], _clip(aborted["msg"], 120)))
         print("    중단된 실행은 개발팀에 전달하지 않습니다.")
         return EXIT_ABORT
     return 1 if count["FAIL"] or count["ERROR"] or report_path is None else 0

@@ -208,6 +208,9 @@ def sc_dry():
           reason_of(res, "S7"))
     check("dry: S13 케이스 anchor body 는 anchor 없음 (요소를 찾지 못함)",
           "요소를 찾지 못함" in reason_of(res, "S13"), reason_of(res, "S13"))
+    n = {k: sum(1 for r in res.values() if r["status"] == k) for k in ("BLOCKED", "SKIPPED")}
+    check("dry: 콘솔 결과 줄에 차단 · 승인 대기 건수 (R3-28)",
+          " / 차단 {} / 승인 대기 {} / 전체 {}".format(n["BLOCKED"], n["SKIPPED"], len(res)) in out, out[-300:])
 
 
 @scenario
@@ -267,6 +270,18 @@ def sc_getw():
     check("getw: 막지 못한 GET 쓰기는 의심 신호", all(res.get(c, {}).get("get_suspects") for c in ("G1", "G3")),
           str({c: res.get(c, {}).get("get_suspects") for c in ("G1", "G3")}))
     check("getw: 리포트 할 일에 'GET 쓰기 의심'", "GET 쓰기 의심" in text(f, "리포트.html"))
+    # R3-28 · R3-34: 콘솔 끝 두 줄, 의심 케이스마다 머리줄 태그 · #warn 목록 한 줄
+    sus_ids = [c for c, r in res.items() if r.get("get_suspects")]
+    check("getw: 콘솔에 결과 줄(차단 · 승인 대기) · GET 쓰기 의심 줄",
+          "[*] 결과: 통과 " in out and " / 차단 " in out and " / 승인 대기 " in out
+          and qa_run.CONSOLE_GET_SUSPECT.format(len(sus_ids)) in out, out[-400:])
+    rep = text(f, "리포트.html")
+    warn = rep.split('id="warn"', 1)[-1].split("</details>", 1)[0] if 'id="warn"' in rep else ""
+    heads = {c: rep.split('id="case-{}"'.format(c), 1)[-1].split('class="cbody"', 1)[0] for c in sus_ids}
+    check("getw: 의심 케이스 머리줄 태그 · #warn 목록 케이스마다 한 줄",
+          bool(sus_ids) and all("GET 쓰기 의심</span>" in h for h in heads.values())
+          and all('href="#case-{}"'.format(c) in warn for c in sus_ids)
+          and warn.count("<li>GET 쓰기 의심 · ") == len(sus_ids), "{} / {}".format(sus_ids, warn[:300]))
     # 신호 범위 (R3-09): 선택 변경 · 1초 뒤 · 다른 호스트 GET 도 의심 목록에, 무시 목록 경로는 없음
     expect_status("getw: 선택 · 지연 · 다른 호스트 GET 케이스", res, {"G4": "PASS", "G5": "PASS", "G6": "PASS",
                                                               "G7": "PASS"})
@@ -284,7 +299,7 @@ def sc_late():
     ran = expect_status("late: 막은 뒤의 실패는 판정 불가", res, {"L1": "ERROR", "L2": "ERROR", "X1": "ERROR"})
     no_writes("late: 서버 쓰기 0", ran, w)
     check("late: 개발 전달 0건", "미반영 오류 0건" in text(f, "웍스등록.txt"), text(f, "웍스등록.txt")[:120])
-    check("late: 사유에 '화면 흐름이 달라짐'", has_reason(res, "L2", qa_run.REASON_INTERFERED), reason_of(res, "L2"))
+    check("late: 사유에 '판정 불가 - 안전망 개입'", has_reason(res, "L2", qa_run.REASON_INTERFERED), reason_of(res, "L2"))
 
 
 @scenario
@@ -505,6 +520,9 @@ def sc_sess():
           all("검수 중단 · 전달 보류 (2건 중 1건 실행)" in x for x in (log, md, rep)), log[:120])
     check("sess: 중단된 실행은 복사 버튼 없음", 'id="copybtn"' not in rep)
     check("sess: 칩 옆 총계 '전체 2건 중 1건 실행'", "전체 2건 중 1건 실행" in rep)
+    check("sess: 개발 탭 숫자 '보류' · 할 일 첫 항목 '다시 로그인 후 실행' (R3-33)",
+          '개발 전달용<span class="cnt">보류</span>' in rep
+          and '<b>할 일</b><a class="todo" href="#abort">다시 로그인 후 실행</a>' in rep)
 
 
 @scenario
@@ -521,10 +539,11 @@ def sc_sessblk():
     info = meta.get("aborted_info") or {}
     check("sessblk: aborted_info 에 최근 막은 요청", info.get("recent_blocked") == [path], str(info))
     rep = text(f, "리포트.html")
-    alert = rep.split('<div class="alert">', 1)[-1].split("</div>", 1)[0] if '<div class="alert">' in rep else ""
+    alert = rep.split('<div class="alert"', 1)[-1].split("</div>", 1)[0] if '<div class="alert"' in rep else ""
     check("sessblk: 리포트 중단 알림에 그 경로 · 안내", path in alert and "다시 로그인해도 같은 결과가 납니다" in alert,
           alert[:300])
-    check("sessblk: 콘솔(bat 화면) 끝 안내에 그 경로", qa_run.REASON_SESSION_BLOCKED.format(path) in out, out[-400:])
+    check("sessblk: 콘솔(bat 화면) 끝 안내에 그 경로 · 한 번만",
+          out.count(qa_run.REASON_SESSION_BLOCKED.format(path)) == 1, out[-400:])
     no_writes("sessblk: 서버 쓰기 0 (갱신 POST 도 막힘)", bool(res), w)
 
 

@@ -61,15 +61,23 @@ TREND_META = {"fixed": "수정됨", "still": "계속 실패", "new": "새로 실
 TREND_TONE = {"still": " k-red", "new": " k-red", "unjudged": " k-warn", "still_err": " k-warn"}
 OTHER_AREA = "기타"
 
-# 실패 시점 주소에서 가릴 쿼리 · fragment 이름 (세션 · 토큰류). 이름 전체가 같을 때만 가린다.
-# goods_code · keyword 같은 값은 개발팀이 재현에 써야 하므로 남긴다
-_SECRET_NAMES = ("sid", "jsessionid", "phpsessid", "token", "access_token", "refresh_token", "session", "auth",
-                 "csrf", "password", "pw", "apikey", "api_key")
-_SECRET_Q = re.compile(r"([?&#;](?:{})=)[^&#]*".format("|".join(_SECRET_NAMES)), re.I)
+# 실패 시점 주소에서 가릴 쿼리 · fragment 이름 (세션 · 토큰류). 소문자로 보고
+#   이름 안에 들어 있으면 가림: token · session · secret · passw (session_id · auth_token · id_token · client_secret · passwd)
+#   이름 전체가 같을 때만 가림: 아래 목록 (key · auth · pw 처럼 짧아서 부분일치면 keyword · author 까지 걸리는 것)
+# goods_code · keyword · page · author 같은 값은 개발팀이 재현에 써야 하므로 남긴다
+_SECRET_PARTS = ("token", "session", "secret", "passw")
+_SECRET_NAMES = ("sid", "jsessionid", "phpsessid", "auth", "pw", "csrf", "apikey", "api_key", "key", "code_verifier")
+_QUERY_PAIR = re.compile(r"([?&#;])([^=&#?;]+)=([^&#]*)")
+
+
+def _secret_name(name):
+    n = name.strip().lower()
+    return n in _SECRET_NAMES or any(p in n for p in _SECRET_PARTS)
 
 
 def _mask_url(u):
-    return _SECRET_Q.sub(r"\1***", str(u or ""))
+    return _QUERY_PAIR.sub(lambda m: "{}{}={}".format(m.group(1), m.group(2), "***" if _secret_name(m.group(2))
+                                                      else m.group(3)), str(u or ""))
 
 
 def _aborted(run_meta):
@@ -235,6 +243,58 @@ def _actual_value(r):
     return m.group(1).strip() if m else _actual(r)
 
 
+def _expected_value(r):
+    """실패 메시지의 '기대:' 부분 (판정 메시지 '… - 기대:'x' / 실제:'y'' 형식). 없으면 None.
+
+    따옴표로 시작하면 그대로('x' 포함), 아니면 따옴표로 감싼다('3개 이상').
+    """
+    m = re.search(r"기대(?: 형식)?:\s*(.*?)\s*/\s*실제:", _actual(r))
+    if not m or not m.group(1).strip():
+        return None
+    v = m.group(1).strip()
+    return v if v.startswith("'") else "'{}'".format(v)
+
+
+def _phenomenon(r):
+    """기대 · 실제가 없는 실패 메시지에서 '현상'. 셀렉터는 빼서 기획 문장으로 읽히게 한다."""
+    msgs = []
+    for st in r["steps"]:
+        if st["status"] != "FAIL" or not st.get("msg") or st.get("phase") == "cleanup":
+            continue
+        msg, act, label = st["msg"], st.get("action") or "", st.get("label") or ""
+        sel = label[len(act):].strip() if act and label.startswith(act) else ""
+        if sel:
+            msg = msg.replace(sel + ": ", "").replace(" - " + sel, "").replace(sel, "").strip()
+        msgs.append(msg)
+    return " / ".join(msgs) if msgs else (r.get("reason") or "")
+
+
+def _no_fix_line(r):
+    """fix 가 없는 결함의 웍스 한 줄. 테스트 제목 · 셀렉터 · 스텝 이름은 쓰지 않는다.
+
+    기대 · 실제가 있으면 `{영역} 오류: '{실제}' 노출 (SB: {기대})`,
+    없으면 `{영역} 오류: {현상 앞 40자}… (SB: {근거})`. 영역이 없으면 '화면'.
+    """
+    area = (r.get("area") or "").strip() or "화면"
+    exp = _expected_value(r)
+    if exp is not None and "실제:" in _actual(r):
+        act = _actual_value(r)
+        act = act if len(act) <= 60 else act[:60] + "…"
+        return "{} 오류: '{}' 노출 (SB: {})".format(area, act, exp)
+    ph = re.sub(r"\s+", " ", _phenomenon(r)).strip()
+    if len(ph) > 40:
+        # 다음 현상(" / ") 또는 낱말 경계에서 자른다. 낱말 중간 · 셀렉터 조각에서 끊기지 않게
+        cut = ph[:41]
+        at = cut.rfind(" / ")
+        if at < 10:
+            at = cut.rfind(" ")
+        ph = (cut[:at] if at >= 10 else ph[:40]).rstrip(" -·/") + "…"
+    line = "{} 오류: {}".format(area, ph)
+    if r.get("source"):
+        line += " (SB: {})".format(r["source"])
+    return line
+
+
 def _env_line(spec, r=None):
     meta = spec["meta"]
     vp = meta.get("viewport") or {"width": 1600, "height": 900}
@@ -253,15 +313,13 @@ def _fix_line(r, with_id=False, sev_prefix=True):
 
     `{actual}` 을 넣어두면 이번 실행의 실제 값으로 바꾼다. 개발팀이 일부만 고쳐 현상이
     바뀌었는데 지난번 문장을 그대로 보내면 "고쳤는데 왜 같은 말" 이 된다.
-    fix 가 없으면 테스트 제목 대신 `영역 오류: 실제 현상 (SB: 근거)` 로 만든다.
+    fix 가 없으면 `영역 오류: '실제' 노출 (SB: '기대')` 형식으로 만든다 (_no_fix_line).
     치명 건은 앞에 [치명] 을 붙인다(개발 탭은 태그로 대신). 줄 끝 케이스 ID 는 재검수 회신 때
     "3번" 이 회차마다 다른 건을 가리키는 문제를 막는다.
     """
     line = (r.get("fix") or "").strip()
     if not line:
-        line = "{} 오류: {}".format((r.get("area") or "").strip() or r["title"], _actual_value(r)[:80])
-        if r.get("source"):
-            line += " (SB: {})".format(r["source"])
+        line = _no_fix_line(r)
     if "{actual}" in line:
         line = line.replace("{actual}", _actual_value(r))
     if sev_prefix and (r.get("severity") or "").strip() == "치명":
@@ -500,12 +558,25 @@ def _shots_html(r, big=False, names=None):
     return '<div class="shots{}">{}</div>'.format(" big" if big else "", figs)
 
 
+GET_SUSPECT_NOTE = ('버튼을 누른 직후 나간 요청입니다. 안전망이 막지 못하는 방식이라 운영 데이터가 바뀌었을 수 '
+                    '있습니다. 같은 스펙을 다시 돌리기 전에 Claude 에게 <b>"GET 쓰기 의심 주소 막아줘"</b> 라고 '
+                    '요청합니다.')
+
+
 def _case_body(r, spec_case, spec_path):
-    # 사유가 실패 스텝 메시지와 같은 문장이면 바로 아래에서 또 보인다. 한 번만 싣는다.
+    # 사유가 실패 스텝 메시지에 다 들어 있으면 바로 아래에서 또 보인다. 한 번만 싣는다.
+    # 사유가 더 길면(판정 불가 - 안전망 개입 … 이후 결과: 스텝 메시지) 앞부분이 핵심이라 싣는다
     txt = r["reason"]
-    if txt and any(st["status"] == "FAIL" and st["msg"] and st["msg"] in txt
-                   for st in r["steps"]):
-        txt = ""
+    if txt:
+        rest = txt
+        for st in r["steps"]:
+            if st["status"] == "FAIL" and st["msg"]:
+                if txt in st["msg"]:
+                    rest = ""
+                    break
+                rest = rest.replace(st["msg"], "")
+        if not rest.strip(" /·-"):
+            txt = ""
     rows = ""
     if txt:
         rows += '<dt>사유</dt><dd class="reason">{}</dd>'.format(_esc(txt))
@@ -522,12 +593,12 @@ def _case_body(r, spec_case, spec_path):
         rows += '<dt>실패 시점 주소</dt><dd class="src">{}</dd>'.format(_esc(_mask_url(r["fail_url"])))
     if r.get("unclean"):
         vals = ", ".join("'{}'".format(v) for v in r.get("unclean_inputs") or []) or "(입력값 없음)"
-        rows += ('<dt>운영 데이터</dt><dd class="reason">정리되지 않음 - 이 값으로 만든 데이터를 '
+        # 기획팀이 직접 지울 일이라 주황 (빨강은 개발 전달에만)
+        rows += ('<dt>운영 데이터</dt><dd class="unclean">정리되지 않음 - 이 값으로 만든 데이터를 '
                  '직접 찾아 지워야 합니다: {}</dd>').format(_esc(vals))
     if r.get("get_suspects"):
-        rows += ('<dt>GET 쓰기 의심</dt><dd>클릭 직후 나간 요청입니다. 안전망이 막지 못하는 방식이라 '
-                 '운영 데이터가 바뀌었는지 확인이 필요합니다. 쓰기 주소면 스펙 blocklist 에 적습니다.'
-                 '<ul class="sus">{}</ul></dd>').format(
+        rows += ('<dt>GET 쓰기 의심</dt><dd>{}<ul class="sus">{}</ul></dd>').format(
+            GET_SUSPECT_NOTE,
             "".join("<li>{}</li>".format(_esc(_mask_url(s))) for s in r["get_suspects"]))
     if r.get("changed"):
         rows += '<dt>지난 현상</dt><dd>{} <span class="ktag k-warn">현상 바뀜</span></dd>'.format(
@@ -572,7 +643,11 @@ def _case_block(r, spec_case, spec_path):
         tags.append('<span class="ktag">{}</span>'.format(_esc(KIND_META[kind][0])))
     sev = (r.get("severity") or "").strip()
     if sev:
-        tags.append('<span class="ktag{}">{}</span>'.format(" k-red" if sev == "치명" else "", _esc(sev)))
+        # 빨강은 개발 전달(실패)에만. 치명 케이스가 통과 · 점검 필요면 회색
+        tags.append('<span class="ktag{}">{}</span>'.format(
+            " k-red" if sev == "치명" and r["status"] == "FAIL" else "", _esc(sev)))
+    if r.get("get_suspects"):
+        tags.append('<span class="ktag k-warn">GET 쓰기 의심</span>')
     if r.get("flaky"):
         tags.append('<span class="ktag">재실행 통과</span>')
     elif r.get("retried"):
@@ -799,24 +874,32 @@ def _list_block(tone, title, desc, items, bid=""):
         c=tone, i=' id="{}"'.format(bid) if bid else "", t=_esc(title), d=desc, li="".join(items))
 
 
-def _todo_html(results, cov_rows, warnings, n_dev, aborted=False):
+def _todo_html(results, cov_rows, warnings, n_dev, aborted=False, run_meta=None):
     """칩 아래 할 일 한 줄. 누가 무엇을 해야 하는지만."""
     cnt = {k: sum(1 for r in results if r["status"] == k) for k in STATUS_META}
     items = []
+    if aborted:
+        # 중단된 실행은 다시 돌리는 게 먼저다. 세션 만료면 로그인부터
+        why = ((run_meta or {}).get("aborted_info") or {}).get("why")
+        items.append('<a class="todo" href="#abort">{}</a>'.format(
+            "다시 로그인 후 실행" if why == "session" else "다시 실행 필요"))
     unclean = [r for r in results if r.get("unclean")]
     if unclean:
-        # 운영에 남은 테스트 데이터가 가장 급하다
-        items.append('<a class="todo red" href="#case-{}">운영 데이터 미정리 {}건</a>'.format(
+        # 운영에 남은 테스트 데이터가 급하다. 기획팀이 지울 일이라 주황 (빨강은 개발 전달에만)
+        items.append('<a class="todo" href="#case-{}">운영 데이터 미정리 {}건</a>'.format(
             _esc(unclean[0]["id"]), len(unclean)))
     if n_dev and not aborted:
         items.append('<button type="button" class="todo red" onclick="tab(\'dev\')">개발 전달 {}건</button>'.format(n_dev))
     sus = [r for r in results if r.get("get_suspects")]
     if sus:
-        items.append('<a class="todo" href="#case-{}">GET 쓰기 의심 {}건</a>'.format(
-            _esc(sus[0]["id"]), len(sus)))
+        # 의심 케이스는 대개 통과 묶음 안에 접혀 있다. 케이스 · 주소를 한 줄씩 모은 경고 목록으로 보낸다
+        items.append('<a class="todo" href="#warn" onclick="openInfo(\'warn\')">GET 쓰기 의심 {}건</a>'.format(
+            len(sus)))
     nofix = [r for r in _dev_items(results) if not (r.get("fix") or "").strip()]
     if nofix and not aborted:
-        items.append('<a class="todo" href="#lint" onclick="openInfo(\'lint\')">fix 없음 {}건</a>'.format(len(nofix)))
+        # 스펙 점검 블록의 'fix 없음' 줄은 스펙 전체 기준이라, 할 일은 이번 전달 범위임을 밝힌다
+        items.append('<a class="todo" href="#lint" onclick="openInfo(\'lint\')">이번 전달 중 fix 없음 {}건</a>'.format(
+            len(nofix)))
     for k, word in (("ERROR", "점검 필요"), ("FLAKY", "불안정"), ("BLOCKED", "차단"), ("SKIPPED", "승인 대기")):
         if cnt[k]:
             items.append('<button type="button" class="todo" onclick="flt(\'{}\')">{} {}건</button>'.format(
@@ -846,17 +929,19 @@ def _aborted_html(run_meta, results):
                 " · 입력값 " + _esc(", ".join("'{}'".format(v) for v in r.get("unclean_inputs") or []))
                 if r.get("unclean_inputs") else "") for r in unclean))
     if info.get("why") == "error":
+        msg = str(info.get("msg", ""))
         head = "{at}번째 케이스({cid})에서 실행이 멈췄습니다 ({msg}).".format(
-            at=info["at"], cid=_esc(info["case"]), msg=_esc(str(info.get("msg", ""))[:120]))
+            at=info["at"], cid=_esc(info["case"]), msg=_esc(msg if len(msg) <= 120 else msg[:120] + "…"))
         how = "원인을 확인한 뒤 다시 실행합니다."
     else:
-        head = "로그인 세션 만료로 {at}번째 케이스({cid})에서 멈췄습니다.".format(
+        # 케이스 카드 사유(qa_run.REASON_SESSION)와 같은 말로 쓴다
+        head = "로그인이 풀려 {at}번째 케이스({cid})에서 멈췄습니다.".format(
             at=info["at"], cid=_esc(info["case"]))
         how = "login_qa.bat 으로 다시 로그인한 뒤 실행합니다."
         if info.get("note"):
             # 실행 중 막은 요청 (토큰 갱신 POST 를 막아 로그아웃된 경우 다시 로그인해도 같다)
             how += "<br>" + _esc(info["note"])
-    return ('<div class="alert"><b>{head}</b> 전체 {total}건 중 {done}건 결과이며, 개발팀에 전달하지 '
+    return ('<div class="alert" id="abort"><b>{head}</b> 전체 {total}건 중 {done}건 결과이며, 개발팀에 전달하지 '
             '않습니다. {how}{ul}</div>').format(
         head=head, total=info["total"], done=min(len(results), info["total"]), how=how, ul=ul)
 
@@ -877,27 +962,50 @@ LINT_KINDS = {
 }
 
 
+# 스펙 점검 줄마다 붙이는 영향 한 마디 (묶음 이름 기준). 판정 · 전달에 어떤 차이가 나는지
+LINT_EFFECT = {
+    "fix 없음": "웍스 줄이 '영역 오류: 현상' 으로 대신 나감",
+    "area 없음": "웍스 줄이 '기타' 아래로 감",
+    "anchor 없는 판정": "요소가 없으면 점검 필요로 나옴",
+    "없는 요건 ID": "요건 커버리지에 안 잡힘",
+    "soft 위치": "실패하면 그 스텝에서 바로 멈춤",
+    "승인 쓰기 케이스 첫 스텝 goto 아님": "실행 안 됨",
+    "페이지 전체 anchor": "셀렉터가 낡아도 실패로 나갈 수 있음",
+    "짧은 blocklist 주소 패턴": "엉뚱한 요청까지 막혀 점검 필요가 늘어남",
+    "내장 목록에 없는 blocklist_off": "무시됨, 그 버튼은 계속 막힘",
+}
+
+
 def _has_warn(warnings, code):
     return any(c == code for c, _ in warnings)
 
 
-def _warn_blocks(warnings):
+def _warn_blocks(warnings, results=()):
     lint, risk = {}, []
     for code, w in warnings:
         kind = LINT_KINDS.get(code)
         if kind:
             lint.setdefault(kind, []).append(w.split(":", 1)[0])
         else:
-            risk.append(w)
+            risk.append("<li>{}</li>".format(_esc(w)))
+    # GET 쓰기 의심: 케이스마다 한 줄 (케이스 · 주소). 통과 묶음 안에 접혀 있어도 여기서 바로 찾는다
+    for r in results:
+        sus = r.get("get_suspects") or []
+        if sus:
+            more = " 외 {}건".format(len(sus) - 1) if len(sus) > 1 else ""
+            risk.append('<li>GET 쓰기 의심 · <a href="#case-{0}">{0}</a> · {1}{2}</li>'.format(
+                _esc(r["id"]), _esc(_mask_url(sus[0])), _esc(more)))
     out = ""
     if risk:
         out += ('<details class="info t-org" id="warn"><summary>확인할 경고 {}건</summary>'
-                '<ul>{}</ul></details>').format(len(risk), "".join("<li>{}</li>".format(_esc(w)) for w in risk))
+                '<ul>{}</ul></details>').format(len(risk), "".join(risk))
     if lint:
-        lis = "".join("<li>{} {}건: {}</li>".format(_esc(k), len(v), _esc(", ".join(dict.fromkeys(v))))
-                      for k, v in lint.items())
+        lis = "".join("<li>{} {}건: {}{}</li>".format(
+            _esc(k), len(v), _esc(", ".join(dict.fromkeys(v))),
+            " ({})".format(_esc(LINT_EFFECT[k])) if k in LINT_EFFECT else "")
+            for k, v in lint.items())
         out += ('<details class="info" id="lint"><summary>스펙 점검 {n}건</summary>'
-                '<p>판정에는 영향이 없습니다. 스펙을 고칠 때 같이 정리합니다.</p><ul>{l}</ul></details>').format(
+                '<p>스펙을 고칠 때 같이 정리합니다.</p><ul>{l}</ul></details>').format(
             n=sum(len(v) for v in lint.values()), l=lis)
     return out
 
@@ -940,7 +1048,11 @@ header.top .meta code { background:#e9ebef; padding:1px 6px; border-radius:3px; 
 /* 요약 칩 - 스크롤해도 따라온다. 링크로 이동한 대상이 칩 줄 밑에 숨지 않게 여백을 둔다 */
 .chipbar { position:sticky; top:0; z-index:5; background:#f4f5f7; padding:8px 0 6px;
            border-bottom:1px solid var(--line); }
-.case, .info, .area { scroll-margin-top:84px; }
+/* 칩이 두 줄로 접히는 너비도 있어 실제 칩 줄 높이(--chipH, JS 가 잼)만큼 띄운다 */
+.case, .info, .area, .alert { scroll-margin-top:var(--chipH, 84px); }
+/* 한글은 낱말 단위로 줄을 바꾼다 (끝 글자만 다음 줄로 떨어지지 않게). 긴 주소 · 셀렉터는 아무 데서나 끊어 넘치지 않게 */
+.ctitle, .devt, .devhead b, .devhead p, .alert, .gate, dd, .logbox, .todoline, .info summary, .info li, .info p
+  { word-break:keep-all; overflow-wrap:anywhere; }
 .chips { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .chip { display:flex; align-items:baseline; gap:6px; background:#fff; cursor:pointer;
         border:1px solid var(--line); border-radius:999px; padding:5px 14px 5px 12px;
@@ -1033,6 +1145,7 @@ dt { color:var(--sub); font-size:12.5px; }
 dd { margin:0; min-width:0; overflow-wrap:anywhere; }
 .src { color:var(--sub); font-size:12px; }
 .reason { color:var(--red); }
+.unclean { color:var(--org); }
 /* 빨강은 개발 전달(실패)에만. 점검 필요 · 차단 · 승인 대기는 주황, 조건 미충족은 회색 */
 .case:not(.case-FAIL) .reason, .case:not(.case-FAIL) .step-fail { color:var(--org); }
 .case.case-NA .reason, .case.case-NA .step-fail { color:var(--gray); }
@@ -1056,7 +1169,6 @@ dd { margin:0; min-width:0; overflow-wrap:anywhere; }
 .steps li { padding:2px 0; overflow-wrap:anywhere; }
 .sico { font-weight:700; margin-right:4px; }
 .step-fail { color:var(--red); font-weight:600; }
-.step-skip { color:var(--sub); }
 .stepmsg { background:var(--red-bg); color:var(--red); padding:6px 10px; border-radius:4px;
            margin:4px 0; font-size:12px; font-weight:400; }
 .case:not(.case-FAIL) .stepmsg { background:var(--org-bg); color:var(--org); }
@@ -1132,7 +1244,7 @@ footer ul { margin:4px 0 0; padding-left:20px; }
   body { padding:16px 16px 48px; }
   /* 좁은 화면에서는 칩 줄이 화면의 1/6 을 차지해 따라오지 않게 한다 */
   .chipbar { position:static; }
-  .case, .info, .area { scroll-margin-top:8px; }
+  .case, .info, .area, .alert { scroll-margin-top:8px; }
   .tabs button { padding:9px 10px; }
   .total { margin-left:0; width:100%; }
   .chead { padding:10px 12px; }
@@ -1214,6 +1326,17 @@ function openTarget() {
 }
 function openInfo(id) { var d = document.getElementById(id); if (d) d.open = true; }
 window.addEventListener('hashchange', openTarget);
+
+// 링크로 이동한 대상이 칩 줄 밑에 숨지 않게, 칩 줄 실제 높이 + 10px 을 scroll-margin 으로 쓴다
+// (칩이 두 줄로 접히는 너비에서는 84px 로 모자람). 개발 탭에서는 칩 줄이 안 보여 높이가 0 이라 건드리지 않는다
+function chipH() {
+  var bar = document.querySelector('.chipbar');
+  if (bar && bar.offsetHeight) {
+    document.documentElement.style.setProperty('--chipH', (bar.offsetHeight + 10) + 'px');
+  }
+}
+chipH();
+window.addEventListener('resize', chipH);
 
 // 개발 전달용 텍스트 복사.
 // file:// 에서는 navigator.clipboard 가 막히는 브라우저가 있어 예전 방식으로 한 번 더 시도한다.
@@ -1356,7 +1479,7 @@ def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None,
     chips = "".join(
         '<button type="button" class="chip{t}" data-filter="{k}" aria-pressed="false"{dis}>'
         '<b>{n}</b><span>{l}</span></button>'.format(
-            k=k, t=CHIP_TONE.get(k, ""), n=counts[k], l=STATUS_META[k][0],
+            k=k, t=CHIP_TONE.get(k, "") if counts[k] else "", n=counts[k], l=STATUS_META[k][0],
             dis="" if counts[k] else " disabled")
         for k in CHIP_ORDER if counts[k] or k in ("FAIL", "PASS"))
 
@@ -1368,7 +1491,7 @@ def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None,
 
     # 불안정 · 점검 필요 · 승인 대기는 칩 · 할 일 · 케이스 카드에 이미 있다. 같은 목록 블록은 두지 않는다
     blocks = "".join([
-        _warn_blocks(warnings),
+        _warn_blocks(warnings, results),
         _coverage_html(cov_rows, partial),
         _trend_html(results, prev),
         _list_block("", "재실행으로 통과 {}건".format(sum(1 for r in results if r.get("flaky"))),
@@ -1390,10 +1513,10 @@ def build_report(spec, results, warnings, out_dir, dry_run, spec_path=None,
         base=_esc(meta["base_url"]),
         env="화면 너비 {}px".format(vp.get("width", 1600)),
         dry='<span class="drytag">읽기만 실행 (쓰기 케이스 건너뜀)</span>' if dry_run else "",
-        n_all=len(results), n_dev=n_dev_shown,
+        n_all=len(results), n_dev="보류" if aborted else n_dev_shown,
         total=_total_text(run_meta, results),
         alert=_aborted_html(run_meta, results),
-        chips=chips, todo=_todo_html(results, cov_rows, warnings, len(dev_items), aborted),
+        chips=chips, todo=_todo_html(results, cov_rows, warnings, len(dev_items), aborted, run_meta),
         blocks=blocks,
         cases=_cases_html(results, by_id, spec_path),
         dev=_dev_block(spec, results, held_items, md_path.name, log_path.name,
