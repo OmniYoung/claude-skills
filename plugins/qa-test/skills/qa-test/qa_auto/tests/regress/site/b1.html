@@ -6,6 +6,9 @@
 <!-- 확인창: 문구만 보고(취소) 다음 판정 · 바로 뜨는 확인창 -->
 <button id="tolist">목록</button>
 <button id="ask">보기</button>
+<!-- 확인을 눌러야 뜨는 알럿 (확인창 문구와 다름) · 확인창 없이 바로 뜨는 알럿 -->
+<button id="tmpsave">임시저장</button>
+<button id="info">안내 보기</button>
 <!-- 같은 세션 선택 팝업: 팝업 안에서 조회 POST 뒤 부모에 값을 넣는다 -->
 <button id="pick">상품 찾기</button>
 <!-- 케이스 경계: 1.2초 뒤 POST · 1초 뒤 알럿 -->
@@ -19,6 +22,10 @@ document.getElementById('tolist').onclick = function () {
   if (confirm('작성 중인 내용이 사라집니다. 이동할까요?')) document.getElementById('title').textContent = '목록';
 };
 document.getElementById('ask').onclick = function () { confirm('진행할까요?'); };
+document.getElementById('tmpsave').onclick = function () {
+  if (confirm('임시저장하고 이동할까요?')) alert('임시저장되었습니다');
+};
+document.getElementById('info').onclick = function () { alert('입력값을 확인해 주세요.'); };
 document.getElementById('pick').onclick = function () { window.open('/pick.html', 'pick', 'width=400,height=300'); };
 document.getElementById('bg').onclick = function () {
   setTimeout(function () { fetch('/api/write?what=late-bg', {method: 'POST'}).catch(function () {}); }, 1200);

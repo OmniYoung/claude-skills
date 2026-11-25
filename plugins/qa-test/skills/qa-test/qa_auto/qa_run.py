@@ -123,13 +123,27 @@ RERUN = ("FAIL", "ERROR", "FLAKY")
 CLEARS_DIALOGS = {"goto", "click", "dblclick", "press", "fill", "type", "select",
                   "check", "uncheck", "upload", "hover", "download"}
 
+# 요소 하나의 화면 글자 (러너 _guard_click · _guard_press 와 탐색 헬퍼가 같이 쓴다).
+# innerText · value · aria-label · title · alt. 버튼류이거나 글자가 빈 요소는 안에 든 이미지 alt · 아이콘의
+# aria-label · title · svg title 도 읽는다 (최대 5개). 행 · 카드처럼 글자가 있는 요소는 안의 아이콘을 읽지 않는다
+LABEL_JS = """x => {
+  const out = [x.innerText || '', x.value || '', x.getAttribute('aria-label') || '', x.getAttribute('title') || '',
+               x.getAttribute('alt') || ''];
+  if (x.matches('button,a,[role=button],input[type=submit],input[type=button],input[type=image]')
+      || !(x.innerText || '').trim()) {
+    [...x.querySelectorAll('img[alt],[aria-label],[title],svg title')].slice(0, 5).forEach(c => out.push(
+      c.tagName.toLowerCase() === 'title' ? c.textContent || ''
+        : c.getAttribute('alt') || c.getAttribute('aria-label') || c.getAttribute('title') || ''));
+  }
+  return out;
+}"""
 # 누르기 직전 읽는 화면 글자. own = 요소 자신, up = 그 요소를 감싼 버튼 · 링크(+ withForm 이면 속한 폼의
 # 제출 버튼). up 은 blocklist 대조에만 쓴다. body · html 은 글자를 읽지 않는다 (포커스가 없을 때의 Enter)
 GUARD_TEXTS_JS = """(e, withForm) => {
   if (e === document.body || e === document.documentElement) return {own: [], up: []};
-  const r = x => [x.innerText || '', x.value || '', x.getAttribute('aria-label') || '', x.getAttribute('title') || ''];
+  const r = """ + LABEL_JS + """;
   const up = [];
-  const b = e.closest('button,a,[role=button],input[type=submit],input[type=button],label,[onclick]');
+  const b = e.closest('button,a,[role=button],input[type=submit],input[type=button],input[type=image],area,label,[onclick]');
   if (b && b !== e) up.push(...r(b));
   if (withForm && e.form) {
     e.form.querySelectorAll('button:not([type]),button[type=submit],input[type=submit],input[type=image]')
@@ -138,7 +152,7 @@ GUARD_TEXTS_JS = """(e, withForm) => {
   return {own: r(e), up: up};
 }"""
 # 요소를 누르는 효과가 있는 키 (press). 이 키만 blocklist 를 본다
-ACTIVATE_KEYS = ("enter", "numpadenter", "space", " ")
+ACTIVATE_KEYS = ("enter", "numpadenter", "space", " ", "\n", "\r")
 
 
 def _expand_str(s, qa_prefix, run_id):
@@ -341,6 +355,8 @@ REASON_RESIDUE_WRITE = "잔여 데이터 점검 스텝에 쓰기 동작이 있�
 REASON_RUNTIME_BLOCKLIST = "blocklist 패턴 '{}' 와 같은 버튼 - 실행 거부"
 REASON_RUNTIME_WRITE = ("버튼 글자 '{shown}' 에 '{hint}' 이 있어 쓰기 동작으로 판정 - 쓰기 선언 · 승인이 필요합니다. "
                         "조회 버튼이면 스텝에 write:false")
+REASON_TYPE_TAB = ("입력값에 탭 글자가 있어 실행 거부 - 탭은 포커스를 다음 버튼으로 옮겨 누를 수 있습니다. "
+                   "Claude 에게 \"입력 스텝 나눠줘\" 라고 요청합니다.")
 # 안전망
 INTERFERE_REQUEST = "요청 차단"     # runner.interfered 에 넣는 값. REASON_INTERFERED 의 {what} 에 들어간다
 INTERFERE_DIALOG = "확인창 취소"
@@ -1210,10 +1226,18 @@ class Runner:
             # fill 과 달리 기존 값을 지우지 않고 키 입력을 흉내낸다.
             # 글자수 제한처럼 입력 중 동작하는 검증에는 이쪽이 맞다.
             value = step.get("text", "")
+            # 탭은 포커스를 다음 요소로 옮겨 뒤 글자(공백)가 그 버튼을 누를 수 있다. 쓸 일이 없어 거부한다
+            if "\t" in value:
+                raise StepFailure(REASON_TYPE_TAB)
             self._warn_prefix(value, case_id, idx)
             if step.get("clear"):
                 self.page.fill(sel, "")
-            self.page.type(sel, value, delay=step.get("delay", 20))
+            # 줄바꿈은 Enter 로 눌려 폼을 제출한다. press Enter 처럼 폼 제출 버튼 글자를 blocklist 에 먼저 대조한다
+            if "\n" in value or "\r" in value:
+                h = self._guard_press(sel, "Enter", timeout)
+                h.type(value, delay=step.get("delay", 20))
+            else:
+                self.page.type(sel, value, delay=step.get("delay", 20))
 
         elif action == "hover":
             # locator.hover()는 셀 안 인라인 span에서 hit-test를 오판해 타임아웃이 난다.
@@ -1376,14 +1400,15 @@ class Runner:
                     return None
                 return "알럿 문구 불일치 - 기대: {} / 실제:'{}'".format(desc, " | ".join(self.dialogs))
             err = self._until(check, step.get("timeout", 5000))
-            # 취소 기록은 여기서 소비한다. 문구가 다르면 취소 전에 화면에 뜬 문구가 다른 것이라 FAIL 이 맞다.
-            # 문구가 맞아도 확인창을 취소했으므로 이후 화면은 실제 사용(확인을 누름)과 다르다.
-            # 그래서 이후의 판정 실패는 개발 전달로 보내지 않게 개입으로 남긴다
+            # 취소 기록은 여기서 소비한다. 확인창을 취소했으면 문구가 맞든 다르든 개입으로 남긴다.
+            # 기대 문구가 확인을 눌러야 뜨는 다음 알럿이면 취소 때문에 안 뜬 것이고, 러너는 확인창 문구 자체가
+            # 틀린 경우와 가를 수 없다. 그래서 문구 불일치도 점검 필요(ERROR)로 두고, 문구가 맞아도 이후 화면은
+            # 실제 사용(확인을 누름)과 다르므로 이후의 판정 실패도 점검 필요다. 취소 기록이 없을 때의 불일치만 FAIL
             cancelled, self.dismissed = bool(self.dismissed), []
-            if err:
-                raise AssertFail(err)
             if cancelled:
                 self.interfered.add(INTERFERE_DIALOG)
+            if err:
+                raise AssertFail(err)
 
         elif action == "expect_no_dialog":
             # 알럿은 조작 뒤 조금 늦게 뜰 수 있다. 바로 보면 "안 떴다" 로 거짓 통과한다
@@ -1500,10 +1525,10 @@ def diagnose_chain(runner, case, result, dry_run):
     실패한 스텝을 **직전 동작 하나만 앞세워** 새 페이지에서 다시 밟아본다.
     통과하면 앞선 동작들이 남긴 상태가 원인이고, 그대로 실패하면 기능 자체 문제다.
 
-    쓰기를 다시 하게 되는 경우는 진단하지 않는다. dry-run 실행도
+    쓰기를 다시 하게 되는 경우(GET 쓰기 의심이 난 케이스 포함)는 진단하지 않는다. dry-run 실행도
     애초에 기획대로 밟은 게 아니라 진단할 수 없다.
     """
-    if dry_run or case_writes(case):
+    if dry_run or case_writes(case) or runner.get_suspects:
         return None
     steps = case["steps"]
     failed = next((s["n"] for s in result["steps"]
@@ -1593,6 +1618,11 @@ def merge_retry(first, second):
     r["duration"] = round(first["duration"] + second["duration"], 1)
     r["try1"] = {"status": first["status"], "reason": first["reason"], "shots": first["shots"]}
     r["shots"] = first["shots"] + second["shots"]
+    # 1차의 GET 쓰기 의심 기록은 재실행이 그 지점까지 못 가도 남긴다
+    sus = first.get("get_suspects", [])
+    sus = sus + [x for x in second.get("get_suspects", []) if x not in sus]
+    if sus:
+        r["get_suspects"] = sus[:10]
     if r["status"] == "PASS" and first["status"] == "FAIL":
         # 화면이 기대와 달랐다가 다시 보니 맞았다. 통과로 덮지 않고 기획팀이 본다
         r.update(status="FLAKY", reason=REASON_FLAKY.format(first["reason"]))
@@ -2534,9 +2564,9 @@ def _context_args(conf, name, meta, spec_path, workspace):
 GUARD_CLICK_INIT_JS = """(() => {
   const PATS = %s;
   const norm = s => String(s || '').replace(/\\s+/g, ' ').trim();
-  const read = x => [x.innerText, x.value, x.getAttribute('aria-label'), x.getAttribute('title')].map(norm).filter(Boolean);
+  const read = x => (""" + LABEL_JS + """)(x).map(norm).filter(Boolean);
   const hit = el => {
-    const b = el.closest('button,a,[role=button],input[type=submit],input[type=button],label,[onclick]');
+    const b = el.closest('button,a,[role=button],input[type=submit],input[type=button],input[type=image],area,label,[onclick]');
     const ts = read(el).concat(b && b !== el ? read(b) : []);
     return PATS.find(([k, n]) => n && ts.some(t => k === 'exact' ? t === n : t.includes(n)));
   };
@@ -2865,10 +2895,10 @@ def main():
                 if sel:
                     timeout_hits[sel] = timeout_hits.get(sel, 0) + 1
                 # 한 번 실패로 단정하지 않는다. 서버가 잠깐 느렸던 건지 진짜 결함인지 가린다.
-                # 쓰기 케이스는 운영 데이터를 한 번 더 만들게 되므로 재실행하지 않는다.
+                # 쓰기 케이스 · GET 쓰기 의심이 난 케이스는 운영 데이터를 한 번 더 바꾸게 되므로 재실행하지 않는다.
                 # 같은 셀렉터가 여러 케이스에서 시간 초과면 화면 구조가 바뀐 것이라 재실행해도 소용없다.
                 if (r["status"] in BAD and not args.no_retry and not r["writes"]
-                        and timeout_hits.get(sel, 0) < 2):
+                        and not r.get("get_suspects") and timeout_hits.get(sel, 0) < 2):
                     first = dict(r, shots=keep_try1(r))
                     # 1차가 window.close() 로 페이지를 닫았거나 팝업을 열어 두었으면 그대로 쓰지 않는다
                     runner.use_page(page_for(name), sessions[name].get("login_check"))

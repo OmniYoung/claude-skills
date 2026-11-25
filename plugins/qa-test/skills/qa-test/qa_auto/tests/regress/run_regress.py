@@ -308,7 +308,7 @@ def sc_dry():
     ran = expect_status("dry: 쓰기 경로 차단", res, {
         "S1": "BLOCKED", "S2": "BLOCKED", "S3": "ERROR", "S4": "ERROR", "S6": "BLOCKED",
         "S7": "ERROR", "S8": "BLOCKED", "S8b": "PASS", "S9": "PASS", "S10": "ERROR",
-        "S11": "ERROR", "S12": "PASS", "S13": "ERROR"})
+        "S11": "ERROR", "S12": "PASS", "S13": "ERROR", "S14": "BLOCKED"})
     no_writes("dry: 서버 쓰기 0", ran, w)
     check("dry: 개발 전달 0건", "미반영 오류 0건" in text(f, "웍스등록.txt"), text(f, "웍스등록.txt")[:80])
     check("dry: S7 write:false 저장 클릭 사유", has_reason(res, "S7", qa_run.REASON_WRITE_FALSE_SENT),
@@ -323,7 +323,9 @@ def sc_dry():
         "S6": (qa_run.REASON_BLOCKLIST, "'withdraw'", gates.BLOCK_BLOCKLIST),
         "S8": (qa_run.REASON_UNDECLARED, "text=저장", gates.BLOCK_UNDECLARED),
         "S10": (qa_run.REASON_NOT_FOUND, "#typo-not-exist", None),
-        "S11": (qa_run.REASON_ABSENCE_UNKNOWN, "#typo-not-exist", None)})
+        "S11": (qa_run.REASON_ABSENCE_UNKNOWN, "#typo-not-exist", None),
+        "S14": (qa_run.REASON_RUNTIME_WRITE, "'삭제'", gates.BLOCK_UNDECLARED)})
+    check("dry: S14 이미지 alt 삭제 링크 GET 서버 0", ran and not any("del_img" in x for x in w), str(w))
     n = {k: sum(1 for r in res.values() if r["status"] == k) for k in ("BLOCKED", "SKIPPED")}
     check("dry: 콘솔 결과 줄에 차단 · 승인 대기 건수 (R3-28)",
           " / 차단 {} / 승인 대기 {} / 전체 {}".format(n["BLOCKED"], n["SKIPPED"], len(res)) in out, out[-300:])
@@ -416,6 +418,14 @@ def sc_getw():
     check("getw: 다른 호스트 GET(remote_save) 의심", "remote_save" in sus["G6"] and "localhost" in sus["G6"],
           sus["G6"])
     check("getw: 무시 목록 경로 GET 은 신호 없음", not sus["G7"], sus["G7"])
+    # R4-D-01: 의심 GET 뒤 판정 실패 → 재실행 없음(서버 GET 1회), 의심 기록 · 콘솔 줄 유지. 재실행을 켜고 돌린다
+    code, f, meta, res, out, w = run("getw_retry", "--dry-run")
+    ran = expect_status("getw: 의심 GET 뒤 판정 실패는 실패 그대로", res, {"G8": "FAIL"})
+    g8 = res.get("G8", {})
+    check("getw: G8 재실행 없음 (서버 GET toggle 1회)", ran and w.count("GET toggle") == 1
+          and not g8.get("retried") and "try1" not in g8, "{} / retried {}".format(w, g8.get("retried")))
+    check("getw: G8 결과에 GET 쓰기 의심 · 콘솔 줄", bool(g8.get("get_suspects"))
+          and qa_run.CONSOLE_GET_SUSPECT.format(1) in out, "{} / {}".format(g8.get("get_suspects"), out[-300:]))
 
 
 @scenario
@@ -483,10 +493,19 @@ def sc_absence():
 def sc_dlg():
     code, f, meta, res, out, w = run("dlg", "--dry-run", "--no-retry")
     ran = expect_status("dlg: 확인창 취소 뒤 판정 · precondition 개입", res,
-                        {"DLG1": "ERROR", "DLG2": "FAIL", "DLG3": "FAIL", "PRE1": "ERROR"})
+                        {"DLG1": "ERROR", "DLG2": "ERROR", "DLG3": "FAIL", "DLG4": "ERROR", "DLG5": "FAIL",
+                         "PRE1": "ERROR"})
     check("dlg: DLG1 사유 '판정 불가 · 확인창 취소'",
           has_reason(res, "DLG1", qa_run.REASON_INTERFERED) and qa_run.INTERFERE_DIALOG in reason_of(res, "DLG1"),
           reason_of(res, "DLG1"))
+    # R4-A-03: 취소한 확인창 뒤 문구 불일치는 판정 불가. 사유에 개입(확인창 취소) · 실제 확인창 문구
+    for cid, shown in (("DLG2", "작성 중인 내용이 사라집니다. 이동할까요?"), ("DLG4", "임시저장하고 이동할까요?")):
+        check("dlg: {} 사유 '판정 불가 · 확인창 취소 · 알럿 문구 불일치 · 실제 확인창 문구'".format(cid),
+              has_reason(res, cid, qa_run.REASON_INTERFERED) and qa_run.INTERFERE_DIALOG in reason_of(res, cid)
+              and "알럿 문구 불일치" in reason_of(res, cid) and shown in reason_of(res, cid), reason_of(res, cid))
+    check("dlg: DLG5 확인창 없는 알럿 문구 불일치는 실패 (개입 아님)",
+          reason_of(res, "DLG5").startswith("알럿 문구 불일치") and "입력값을 확인해 주세요." in reason_of(res, "DLG5"),
+          reason_of(res, "DLG5"))
     check("dlg: PRE1 은 조건 미충족이 아니라 조건 확인 불가(안전망 개입)",
           has_reason(res, "PRE1", qa_run.REASON_PRE_INTERFERED), reason_of(res, "PRE1"))
     log = text(f, "웍스등록.txt")
@@ -530,19 +549,26 @@ def sc_boundary():
 
 @scenario
 def sc_bypass():
+    # BY4~BY11: 글자 없는 이미지 · 아이콘 버튼 (R4-A-01), BY7 · BY7R · BY8: 입력값 줄바꿈 · press "\n" (R4-A-02)
+    blocked = ("BY1", "BY2", "BY3", "BY4", "BY5", "BY6", "BY9", "BY10", "BY11", "BY7", "BY7R", "BY8")
     code, f, meta, res, out, w = run("bypass", "--no-retry")
-    ran = expect_status("bypass: 아이콘 셀렉터 · Enter · onclick div 안 아이콘은 내장 blocklist 로 차단", res,
-                        {"BY1": "BLOCKED", "BY2": "BLOCKED", "BY3": "BLOCKED", "BY0": "PASS"})
-    for cid in ("BY1", "BY2", "BY3"):
+    ran = expect_status("bypass: 아이콘 셀렉터 · Enter · onclick div 안 아이콘 · 이미지 alt · 아이콘 대체 글자 · "
+                        "입력값 줄바꿈은 내장 blocklist 로 차단, 탭은 거부", res,
+                        dict({c: "BLOCKED" for c in blocked}, BY0="PASS", BYR="PASS", BYT="ERROR"))
+    for cid in blocked:
         check("bypass: {} 사유에 text*=발송".format(cid),
               has_reason(res, cid, qa_run.REASON_RUNTIME_BLOCKLIST) and "text*=발송" in reason_of(res, cid),
               reason_of(res, cid))
+    reason_is("bypass", res, {"BYT": (qa_run.REASON_TYPE_TAB, None, None)})
     check("bypass: 서버 POST send_* 0", ran and not any("send" in x for x in w), str(w))
     code, f, meta, res, out, w = run("bypass_off", "--no-retry")
-    ran = expect_status("bypass: blocklist_off 로 풀면 세 경로 모두 실행", res,
-                        {"BY1": "PASS", "BY2": "PASS", "BY3": "PASS", "BY0": "PASS"})
+    ran = expect_status("bypass: blocklist_off 로 풀면 경로마다 실행 (탭은 그대로 거부)", res,
+                        dict({c: "PASS" for c in blocked}, BY0="PASS", BYR="PASS", BYT="ERROR"))
+    reason_is("bypass_off", res, {"BYT": (qa_run.REASON_TYPE_TAB, None, None)})
     check("bypass: 풀었을 때 서버 쓰기 경로마다 1회",
-          ran and sorted(w) == ["POST send_div", "POST send_enter", "POST send_icon"], str(w))
+          ran and sorted(w) == sorted("POST " + x for x in (
+              "send_div", "send_enter", "send_icon", "send_img", "send_img2", "send_ico", "send_imgin", "send_aria",
+              "send_svg", "send_typenl", "send_typecr", "send_pressnl")), str(sorted(w)))
 
 
 @scenario
@@ -591,7 +617,7 @@ def sc_explore():
     try:
         with qa_run.guarded_page(spec, headed=False) as page:
             page.goto(WORK["base"] + "/b2.html", wait_until="domcontentloaded")
-            for sel in ("#xsave", "#xdel", "#xsendget"):
+            for sel in ("#xsave", "#xdel", "#xsendget", "#imgsend"):
                 page.evaluate("() => { document.getElementById('marker').textContent = 'none'; }")
                 page.click(sel)
                 page.wait_for_timeout(600)
@@ -602,6 +628,8 @@ def sc_explore():
     check("explore: 저장 POST 는 막힘", marks.get("#xsave") == "blocked", str(marks))
     check("explore: 삭제 확인창은 취소됨", marks.get("#xdel") == "cancelled", str(marks))
     check("explore: 내장 blocklist 글자(발송) 버튼 클릭은 막힘", marks.get("#xsendget") == "none", str(marks))
+    # R4-A-01: 이미지 alt 발송 버튼도 클릭 자체를 막음 (막지 않으면 POST 를 안전망이 막아 'blocked')
+    check("explore: 이미지 alt(발송) 버튼 클릭은 막힘", marks.get("#imgsend") == "none", str(marks))
     check("explore: 서버 쓰기 0 (GET 발송 포함)", not WRITES, str(WRITES))
     out = WORK["tmp"] / "output"
     check("explore: 결과 폴더를 만들지 않음", not out.exists() or not any(out.glob("rg_explore_*")))

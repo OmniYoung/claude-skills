@@ -296,6 +296,14 @@ SPECS["dlg"] = {"meta": meta("rg_dlg"), "cases": [
                                   {"action": "expect_dialog", "contains": "저장하지 않고"}], kind="gap"),
     case("DLG3", "뜨면 안 되는 확인창", [G(B1), {"action": "click", "selector": "#ask", "write": False},
                                    {"action": "expect_no_dialog", "ms": 500}], kind="gap"),
+    # 확인을 눌러야 뜨는 알럿을 기대 (R4-A-03). 확인창을 취소해 안 뜬 것이라 점검 필요, 개발 전달 아님
+    case("DLG4", "확인창 뒤 알럿 문구", [G(B1), {"action": "click", "selector": "#tmpsave", "write": False},
+                                   {"action": "expect_dialog", "contains": "임시저장되었습니다"}],
+         area="저장", fix="DLG4 오류"),
+    # 대조군: 확인창 없이 뜬 알럿의 문구 불일치는 실패
+    case("DLG5", "확인창 없는 알럿 문구 불일치", [G(B1), {"action": "click", "selector": "#info", "write": False},
+                                        {"action": "expect_dialog", "contains": "저장되었습니다", "timeout": 1000}],
+         kind="gap"),
     case("PRE1", "조건 확인 중 조회 POST 차단",
          [G("b1pre.html"), {"action": "expect_count", "selector": "#rows tr", "min": 1, "precondition": True,
                             "anchor": "#title", "settle": 2000}], area="목록", fix="PRE1 오류"),
@@ -346,6 +354,20 @@ BYPASS = [
     approved("BY2", "버튼에 Enter", {"action": "press", "selector": "#send2", "key": "Enter", "write": True}),
     approved("BY3", "onclick div 안 아이콘", {"action": "click", "selector": "div[onclick] > span", "write": True}),
     approved("BY0", "대조군: 목록 버튼 안 아이콘", {"action": "click", "selector": "#list .ico", "write": True}),
+    # 글자 없는 이미지 · 아이콘 버튼 (R4-A-01). 픽스처 글자는 모두 '발송' 계열 (bypass_off 에서 풀리게)
+    approved("BY4", "링크 안 이미지 alt", {"action": "click", "selector": "#imgsend", "write": True}),
+    approved("BY5", "이미지 자체를 누르는 셀렉터", {"action": "click", "selector": "#imgsend2 img", "write": True}),
+    approved("BY6", "링크 안 아이콘 title", {"action": "click", "selector": "#icosend", "write": True}),
+    approved("BY9", "이미지 제출 버튼 alt", {"action": "click", "selector": "#imgin", "write": True}),
+    approved("BY10", "링크 안 아이콘 aria-label", {"action": "click", "selector": "#arsend", "write": True}),
+    approved("BY11", "버튼 안 svg title", {"action": "click", "selector": "#svgsend", "write": True}),
+    # 입력값 줄바꿈 · press 키 "\n" 은 Enter 로 폼 제출 (R4-A-02). 탭은 거부
+    approved("BY7", "입력값 끝 줄바꿈 \\n", {"action": "type", "selector": "#msg", "text": "[QA]hi\n", "write": True}),
+    approved("BY7R", "입력값 끝 줄바꿈 \\r", {"action": "type", "selector": "#msgr", "text": "[QA]hi\r", "write": True}),
+    approved("BY8", "press 키 \\n", {"action": "press", "selector": "#msg2", "key": "\n", "write": True}),
+    approved("BYT", "입력값 탭", {"action": "type", "selector": "#msg", "text": "[QA]a\tb", "write": True}),
+    # 대조군: 행 클릭은 안에 든 아이콘 alt('발송완료')를 읽지 않음
+    approved("BYR", "대조군: 아이콘 alt 가 든 행 클릭", {"action": "click", "selector": "#row1 .no", "write": False}),
 ]
 SPECS["bypass"] = {"meta": meta("rg_bypass"), "cases": BYPASS}
 SPECS["bypass_off"] = {"meta": meta("rg_bypass_off", blocklist_off=["text*=발송"]), "cases": BYPASS}
@@ -360,6 +382,12 @@ SPECS["getw"]["cases"] += [
     case("G6", "다른 호스트로 가는 GET", [G(B2), {"action": "click", "selector": "#xget"}, WAIT]),
     case("G7", "무시 목록 경로의 GET", [G(B2), {"action": "click", "selector": "#statget"}, WAIT]),
 ]
+# GET 쓰기 의심이 난 실패 케이스는 재실행 · 진단으로 같은 조작을 다시 하지 않음 (R4-D-01). 재실행 켜고 돌린다
+SPECS["getw_retry"] = {"meta": meta("rg_getw_retry"), "cases": [
+    case("G8", "의심 GET 뒤 판정 실패", [G(BP), {"action": "click", "selector": "#toggle"},
+                                   {"action": "expect_text", "selector": "#title", "contains": "없는문구",
+                                    "settle": 300}]),
+]}
 
 # write:false 로 둔 빈 폼 제출이 쓰기 요청을 보냄 = 검증 누락 후보 (R3-12)
 SPECS["wfalse"] = {"meta": meta("rg_wfalse"), "cases": [
@@ -391,6 +419,9 @@ SPECS["explore"] = {"meta": meta("rg_explore"), "cases": []}
 SPECS["dry"]["cases"].append(
     case("S13", "없는 셀렉터 + 케이스 anchor body",
          [G(), {"action": "expect_visible", "selector": "#typo-not-exist", "timeout": 1500}], anchor="body"))
+# 글자 없이 이미지 alt 만 '삭제' 인 GET 링크 (R4-A-01): 화면 글자로 쓰기 판정 → 선언 누락 차단, GET 0
+SPECS["dry"]["cases"].append(
+    case("S14", "이미지 alt 삭제 링크 (쓰기 키 없음)", [G("b2.html"), {"action": "click", "selector": "#imgdel"}]))
 
 # -- 4차 묶음 3: 데이터 · 경계 · 안내 --------------------------------
 B3 = "b3.html"

@@ -152,7 +152,7 @@ FS_TABLE = [
     # 확인창 4조합 (R3-01). 취소 기록은 dismissed 에만 쌓이고, expect_dialog 가 통과하면 interfered 를 켠다
     ("취소 → expect_dialog 통과(interfered 켜짐) → 판정 실패 = 점검 필요", qa_run.AssertFail("x"), {DLG}, [], [],
      "ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: x"),
-    ("expect_dialog 문구 불일치(취소 기록 소비) = 실패", qa_run.AssertFail("알럿 불일치"), set(), [], [],
+    ("취소 없는 문구 불일치 = 실패", qa_run.AssertFail("알럿 불일치"), set(), [], [],
      "FAIL", "알럿 불일치"),
     ("판정 스텝 도중 취소(dismissed 만 남음) + 판정 실패 = 점검 필요", qa_run.AssertFail("x"), set(), ["삭제?"], [],
      "ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: x"),
@@ -201,6 +201,15 @@ t("merge_retry: 점검 필요 → 점검 필요는 2차 사유 그대로", (m["s
 m = qa_run.merge_retry(res("ERROR", "시간 초과"), res("PASS"))
 t("merge_retry: 점검 필요 → 통과는 통과 + 재실행 통과 표시", (m["status"], m["reason"], m.get("flaky")),
   ("PASS", "", "시간 초과"))
+# R4-D-01: 1차의 GET 쓰기 의심 기록은 재실행이 그 지점까지 못 가도 남긴다 (2차와 합쳐 중복 제거, 10건 상한)
+m = qa_run.merge_retry(dict(res("FAIL", "a"), get_suspects=["GET /api/del?id=1"]), res("ERROR", "시간 초과"))
+t("merge_retry: 1차 GET 쓰기 의심 + 재실행 없음 = 의심 유지", m.get("get_suspects"), ["GET /api/del?id=1"])
+m = qa_run.merge_retry(dict(res("FAIL", "a"), get_suspects=["GET /a", "GET /b"]),
+                       dict(res("FAIL", "b"), get_suspects=["GET /b"] + ["GET /c{}".format(i) for i in range(10)]))
+t("merge_retry: GET 쓰기 의심은 1차 먼저 · 중복 제거 · 10건",
+  m.get("get_suspects"), ["GET /a", "GET /b"] + ["GET /c{}".format(i) for i in range(8)])
+t("merge_retry: 둘 다 의심 없으면 키 없음", "get_suspects" in qa_run.merge_retry(res("FAIL", "a"), res("FAIL", "b")),
+  False)
 
 # -- 경고 코드 묶음 (report) ----------------------------------------
 from gates import W_NO_FIX, W_ABSENCE_NO_ANCHOR, W_PRE_NO_ANCHOR, W_RESIDUE, W_SELECTOR_UPDATE, W_QA_PREFIX  # noqa: E402
@@ -279,6 +288,10 @@ class StubDialog:
         pass
 
 
+class StubAlert(StubDialog):
+    type = "alert"
+
+
 class FakeRunner(qa_run.Runner):
     """스텝의 _raise 예외를 그대로 내는 러너. _block 이 있으면 그 스텝에서 요청을 막은 것으로 친다."""
 
@@ -296,6 +309,8 @@ class FakeRunner(qa_run.Runner):
         if step.get("_dialog"):
             # 이 스텝 도중 확인창이 떴다 (승인 안 된 스텝이면 취소된다)
             self._on_dialog(StubDialog(step["_dialog"]))
+        if step.get("_alert"):
+            self._on_dialog(StubAlert(step["_alert"]))     # 확인창 없이 뜬 알럿 (취소 기록 없음)
         if step.get("_block"):
             self.blocked_log.append(step["_block"])
             self.interfered.add(qa_run.INTERFERE_REQUEST)
@@ -446,7 +461,22 @@ r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "사라집니
 t("확인창: 취소 → expect_dialog 통과 → 판정 실패 = 점검 필요",
   (r["status"], r["reason"]), ("ERROR", "판정 불가 - 안전망 개입(확인창 취소)으로 화면 흐름이 실제와 다름. 이후 결과: 다름"))
 r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "다른 문구", "timeout": 30}])
-t("확인창: expect_dialog 문구 불일치 = 실패", (r["status"], r["reason"].startswith("알럿 문구 불일치")), ("FAIL", True))
+# R4-A-03: 기대 문구가 확인을 눌러야 뜨는 알럿일 수 있다. 취소한 확인창이 있으면 문구 불일치도 점검 필요
+t("확인창: 취소 → expect_dialog 문구 불일치 = 점검 필요 (사유에 개입 · 실제 확인창 문구)",
+  (r["status"], r["reason"].startswith(qa_run.REASON_INTERFERED.split("{what}")[0]),
+   "({})".format(qa_run.INTERFERE_DIALOG) in r["reason"], "알럿 문구 불일치" in r["reason"], LEAVE in r["reason"]),
+  ("ERROR", True, True, True, True))
+r = run_fake([GOTO, {"action": "click", "selector": "#info", "write": False, "_alert": "입력값을 확인해 주세요."},
+              {"action": "expect_dialog", "contains": "다른 문구", "timeout": 30}])
+t("확인창: 취소 없는 알럿 문구 불일치 = 실패 (대조군)",
+  (r["status"], r["reason"].startswith("알럿 문구 불일치")), ("FAIL", True))
+r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "다른 문구", "timeout": 30, "precondition": True,
+                            "anchor": "#b", "_anchor_ok": True}])
+t("확인창: 취소 → precondition expect_dialog 불일치 = 조건 확인 불가 (조건 미충족 아님)",
+  (r["status"], r["reason"].startswith("조건 확인 불가 - 안전망 개입(확인창 취소)")), ("ERROR", True))
+r = run_fake([GOTO, CLICK, {"action": "expect_dialog", "contains": "다른 문구", "timeout": 30, "soft": True}])
+t("확인창: 취소 → soft expect_dialog 불일치 = 점검 필요",
+  (r["status"], r["reason"].startswith("판정 불가 - 안전망 개입(확인창 취소)")), ("ERROR", True))
 r = run_fake([GOTO, {"action": "expect_text", "selector": "#a", "contains": "x", "_dialog": "삭제?",
                      "_raise": qa_run.AssertFail("다름")}])
 t("확인창: 판정 스텝 도중 취소 + 판정 실패 = 점검 필요",
@@ -458,6 +488,21 @@ t("확인창: 문구만 확인하고 끝나면 통과", (r["status"], r["reason"
 r = run_fake([GOTO, CLICK, {"action": "expect_text", "selector": "#a", "contains": "x"}])
 t("확인창: expect_dialog 없이 다음 스텝 = 점검 필요(취소 사유)",
   (r["status"], r["reason"].startswith("확인창 '" + LEAVE)), ("ERROR", True))
+# R4-A-02: type 값의 탭은 거부, 줄바꿈 · press "\n" 은 Enter 처럼 blocklist 대조
+try:
+    qa_run.Runner.run(FakeRunner(), {"action": "type", "selector": "#q", "text": "a\tb"}, "K", 1)
+    t("type: 탭 글자는 실행 거부", "거부 안 됨", qa_run.REASON_TYPE_TAB)
+except qa_run.StepFailure as e:
+    t("type: 탭 글자는 실행 거부", (type(e).__name__, str(e)), ("StepFailure", qa_run.REASON_TYPE_TAB))
+t("press 키 '\\n' · '\\r' 도 누르는 키 (blocklist 대조)", ("\n" in qa_run.ACTIVATE_KEYS, "\r" in qa_run.ACTIVATE_KEYS),
+  (True, True))
+# R4-D-01: GET 쓰기 의심이 난 케이스는 연속 사용 진단(같은 조작 다시 하기)을 하지 않음
+fr = FakeRunner()
+fr.get_suspects = ["GET /api/wget?what=toggle"]
+t("diagnose_chain: GET 쓰기 의심이 있으면 진단 안 함",
+  qa_run.diagnose_chain(fr, {"id": "K", "chains": True, "steps": [GOTO, {"action": "click", "selector": "#t"},
+                                                                  {"action": "expect_visible", "selector": "#a"}]},
+                        {"steps": [{"phase": "test", "n": 3, "status": "FAIL"}]}, False), None)
 fr = FakeRunner()
 fr.dialogs = ["앞 케이스 알럿"]
 r = run_fake([{"action": "expect_no_dialog", "ms": 0}], runner=fr)

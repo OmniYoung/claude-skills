@@ -11,6 +11,21 @@
 <button id="send2">알림톡 발송</button>
 <div id="sdiv" onclick="post('send_div')" style="display:inline-block;padding:4px;border:1px solid #ccc"><span class="ico" style="display:inline-block;width:10px;height:10px;background:#888"></span> 문자 발송</div>
 <button id="list"><span class="ico" style="display:inline-block;width:10px;height:10px;background:#888"></span>목록</button>
+<!-- 글자 없는 이미지 · 아이콘 버튼: 링크 안 img alt · img 자체 · 링크 안 <i title> · input image · aria-label 아이콘 · svg title.
+     대조군은 아이콘 alt 가 든 행 (행은 안의 아이콘 글자를 읽지 않음) -->
+<a id="imgsend" href="#" onclick="post('send_img');return false"><img alt="알림톡 발송" width="16" height="16" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="></a>
+<a id="imgsend2" href="#" onclick="post('send_img2');return false"><img alt="문자 발송" width="16" height="16" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="></a>
+<a id="icosend" href="#" onclick="post('send_ico');return false"><i title="발송" style="display:inline-block;width:12px;height:12px;background:#888"></i></a>
+<form id="fimg" onsubmit="post('send_imgin');return false"><input type="image" id="imgin" alt="발송하기" width="16" height="16" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="></form>
+<a id="arsend" href="#" onclick="post('send_aria');return false"><span aria-label="알림톡 발송" style="display:inline-block;width:12px;height:12px;background:#888"></span></a>
+<button id="svgsend" onclick="post('send_svg')"><svg width="12" height="12"><title>발송</title><rect width="12" height="12"/></svg></button>
+<table><tr id="row1" onclick="mark('row')"><td class="no">1001</td><td><img alt="발송완료" width="16" height="16" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="></td></tr></table>
+<!-- 입력칸 줄바꿈 · Enter 로 제출되는 폼 (제출 버튼 글자 '알림톡 발송') -->
+<form data-w="send_typenl" onsubmit="post(this.dataset.w);return false"><input id="msg"><button type="submit">알림톡 발송</button></form>
+<form data-w="send_typecr" onsubmit="post(this.dataset.w);return false"><input id="msgr"><button type="submit">알림톡 발송</button></form>
+<form data-w="send_pressnl" onsubmit="post(this.dataset.w);return false"><input id="msg2"><button type="submit">알림톡 발송</button></form>
+<!-- 쓰기 키 없는 클릭: 글자 없이 이미지 alt 만 '삭제' 인 GET 링크 -->
+<a id="imgdel" href="/api/wget?what=del_img"><img alt="삭제" width="16" height="16" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="></a>
 <!-- GET 쓰기 의심: 선택 변경 · 1초 뒤 · 다른 호스트 · 무시 목록 경로 -->
 <select id="st"><option value="1">대기</option><option value="2">진행</option></select>
 <button id="lazyget">보기</button>

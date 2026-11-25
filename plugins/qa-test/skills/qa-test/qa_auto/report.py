@@ -563,7 +563,7 @@ def _shots_html(r, big=False, names=None):
     return '<div class="shots{}">{}</div>'.format(" big" if big else "", figs)
 
 
-GET_SUSPECT_NOTE = ('버튼을 누른 직후 나간 요청입니다. 안전망이 막지 못하는 방식이라 운영 데이터가 바뀌었을 수 '
+GET_SUSPECT_NOTE = ('조작한 뒤 다음 페이지를 열기 전까지 나간 요청입니다. 안전망이 막지 못하는 방식이라 운영 데이터가 바뀌었을 수 '
                     '있습니다. 같은 스펙을 다시 돌리기 전에 Claude 에게 <b>"GET 쓰기 의심 주소 막아줘"</b> 라고 '
                     '요청합니다.')
 
